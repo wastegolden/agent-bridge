@@ -1,19 +1,19 @@
 {
-  "name": "dsh-codex-bridge",
-  "version": "1.3.0+codex.20261004.dsh020",
-  "description": "Bounded parallel DSH development with Codex planning, model routing and verifiable delivery",
+  "name": "agent-bridge",
+  "version": "1.4.0+codex.20261006.dsh020",
+  "description": "Bounded parallel DSH development plus cross-harness consult, review and delegation with Claude Code, under one root controller per task",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "DSH Project Execution",
-    "shortDescription": "Plan in Codex and execute bounded parallel work in DSH.",
-    "longDescription": "Coordinate isolated coding, review and integration tasks through DSH with explicit scope, durable results and controlled cleanup.",
+    "displayName": "Agent Bridge (DSH · Codex · Claude Code)",
+    "shortDescription": "Delegate bounded work to DSH and consult or cross-review with Claude Code.",
+    "longDescription": "Coordinate isolated coding, review and integration tasks through DSH with explicit scope, durable results and controlled cleanup; ask Claude Code for independent review, a second opinion or a delegated sub-project without delegation loops.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Plan this development task, define interfaces and delegate bounded implementation to DSH."
+    "defaultPrompt": "Plan this development task, define interfaces, delegate bounded implementation to DSH and cross-check risky decisions with Claude Code."
   },
   "mcpServers": "./.mcp.json"
 }

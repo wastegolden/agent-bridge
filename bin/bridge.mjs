@@ -13,12 +13,13 @@ import {
   createCarrier,
   createCarrierLogger,
   defaultCredentialFile,
+  nonBlankEnv,
   resolveCarrierToken,
 } from '../src/bridge-carrier.mjs';
 
 const env = process.env;
 const log = createCarrierLogger();
-const credentialFile = env.DSH_BRIDGE_CREDENTIAL_FILE ?? defaultCredentialFile(env);
+const credentialFile = nonBlankEnv(env, 'DSH_BRIDGE_CREDENTIAL_FILE') ?? defaultCredentialFile(env);
 
 // The historical startup refusal is preserved exactly: no token means a stderr line and
 // exit code 2, with nothing written to stdout.

@@ -1,25 +1,36 @@
 ---
 name: dsh-project-execution
-description: Coordinate bounded project work through the DSH Codex bridge (bridge_* tools) by decomposing it into task packets, gating risky work on a returned understanding, running parallel isolated worktrees, reviewing exact commits, integrating verified heads and cleaning up owned tasks. Use when work should be delegated to DSH workers and coordinated rather than done inline.
+description: Coordinate bounded project work through the DSH bridge (dsh_project bridge_* tools) by decomposing it into task packets, gating risky work on a returned understanding, running parallel isolated worktrees, reviewing exact commits, integrating verified heads and cleaning up owned tasks. Use when work should be delegated to DSH (DeepSeek Harness) workers and coordinated rather than done inline, whether the controller is Codex or Claude Code.
 ---
 
 # DSH project execution
 
-Codex is the planner, reviewer and integrator. DSH workers execute bounded tasks.
-For this user's installation, the only authorized DSH model for coding,
-investigation, review and repair is `deepseek-official/deepseek-flash`.
-Use Flash only; do not use Pro or another DSH model unless the user explicitly
-changes this restriction. If Flash is unavailable, report the blocker without
-switching models. Native Astra runs directly under Codex and is never forwarded
-into DSH. Prefer delegating bounded development work to Flash; Codex primarily
-plans, checks, tests and integrates the results.
+The **controller** — whichever harness submits the task, Codex or Claude Code, exactly
+one per task — is the planner, reviewer and integrator. DSH workers execute bounded
+tasks. For this user's installation, the only authorized DSH model for coding,
+investigation, review and repair is DeepSeek Flash (the `flash` route that
+`bridge_models` advertises, e.g. `deepseek-official/deepseek-flash` or
+`deepseek-official/deepseek-v4-flash` depending on the DSH version). Use Flash only;
+do not use Pro or another DSH model unless the user explicitly changes this
+restriction. If Flash is unavailable, report the blocker without switching models.
+The controller's own native subagents (Codex Astra, Claude Code subagents) run under
+the controller's model controls and are never forwarded into DSH. Prefer delegating
+bounded development work to Flash; the controller primarily plans, checks, tests and
+integrates the results. Cross-harness work (asking the other harness) is covered by
+the `agent-bridge-routing` skill.
 
 Use this skill when a request should be split into delegated, verifiable work:
 multi-file changes, independent review, parallel investigation, or a project that
 must survive several rounds. Prefer bounded Flash tasks for coding, review and
-repair whenever the assignment can be stated precisely. Codex retains planning,
-mechanical integration and authoritative acceptance; local implementation is a
-fallback when DSH is unavailable or the project reserves the work for Codex.
+repair whenever the assignment can be stated precisely. The controller retains
+planning, mechanical integration and authoritative acceptance; local implementation
+is a fallback when DSH is unavailable or the project reserves the work for the
+controller.
+
+Several controllers may share one DSH host. Tag every packet with
+`metadata.controller` (`"codex"` or `"claude-code"`) and use a project-specific
+`projectId`; act (approve, acknowledge, archive, clean up) only on tasks you
+submitted.
 
 ## Tool surface
 
@@ -47,7 +58,7 @@ both roots; do not add their parent merely to pass validation. A validation
 rejection before a task ID is returned is a packet error, not a DSH outage.
 Correct the stated field within the original authorization before retrying.
 
-## Controlled autonomy (bridge 1.3.0 / adapter 0.5.0)
+## Controlled autonomy (bridge 1.4.0 / adapter 0.5.0)
 
 Three optional capabilities exist, and each needs **both** host configuration and an
 explicit per-packet declaration. Absent is always off; an ordinary packet gains
@@ -67,16 +78,27 @@ nothing and keeps the unchanged defaults (no shell, no native delegation).
 - **Root wake** — `packet.rootCallback: {grantId}` for a directly delegated root, plus
   host `rootCallbackGrants` and `eventWake`. The destination is host-configured and
   immutable once submitted; the `dsh_bridge_reply` tool takes only a bounded summary
-  and kind. Child outcomes go to the parent, and only designated roots may wake Codex.
+  and kind. Child outcomes go to the parent, and only designated roots may wake the
+  controller.
   A report from a session is never authorization. A configured producer means events are
   durably queued — it does not mean a runner is live or that anything was delivered;
   treat `bridge_capabilities` `liveTransport`/`runnerAvailable`/`liveAck` of `unknown`
   as unverified until an actual run observes a positive exact-target acknowledgement.
 
 Relay the host and per-packet requirements from [README.md](../../README.md) and
-[docs/event-wake.md](../../docs/event-wake.md); the controller starts the wake runner
-with `bin/wake-controller.mjs --config <absolute-json>` (single validated binding, no
-overrides) and never as a worker tool.
+[docs/event-wake.md](../../docs/event-wake.md). The wake runner is a controller-side
+process, never a worker tool, and each controller consumes only its own per-target
+outbox (`<stateRoot>/t-<sha256(targetId)>`):
+
+- **Codex controller:** `bin/wake-controller.mjs --config <absolute-json>` (single
+  validated binding, no overrides; delivers through codex-app-tools).
+- **Claude Code controller:** `bin/wake-claude.mjs --config <absolute-json> --wait`
+  as a background command, or `--follow` as a long-lived monitor. Config keys:
+  `stateRoot`, `targetId` (an opaque label such as `claude-code:main`, granted in host
+  `rootCallbackGrants`), optional `claimLeaseMs`, `maxSummaryChars` (8192) and
+  `requireSessionBinding`. Each event prints one `[dsh-bridge-event]` block; verify it
+  with `bridge_check`/`bridge_result`, then run `--ack <eventId>` (or `--nack`). An
+  unacknowledged event stays `unknown` and is never resent; `--status` shows counts.
 
 ### Complete depth-1 opt-in example
 
@@ -125,8 +147,8 @@ attenuated `toolNames` subset and never sees them:
 }
 ```
 
-Controller startup for the one configured originating chat (paths and limits only;
-`CODEX_THREAD_ID` must equal the granted `targetId`):
+Codex controller startup for the one configured originating chat (paths and limits
+only; `CODEX_THREAD_ID` must equal the granted `targetId`):
 
 ```bash
 node bin/wake-controller.mjs --config F:/DSH/data/codex-bridge-v1/wake-controller.json
@@ -195,7 +217,7 @@ most `maxRepairAttempts` times; and only verified stopped owned work can complet
 cleanly fail the project. The project task waits as `supervising` (active, not settled)
 and reports the real phase in `project.status`.
 
-Worker completions never wake Codex: only the aggregate project completion or a serious
+Worker completions never wake the controller: only the aggregate project completion or a serious
 issue enqueues one bounded callback through the trusted outbox and the binding captured
 at submission. A blocked/`unknown` project (`project.status: "blocked"`, task
 `unknown`, `stopConfirmed: false`) holds its reservations and must be reconciled, never
@@ -286,6 +308,7 @@ Details: [docs/recurrent-supervisor.md](../../docs/recurrent-supervisor.md) and
 - [references/runtime-tools.md](references/runtime-tools.md) — bridge_* semantics, bounded waits, cancellation, acknowledgement, capability probing.
 - [references/model-routing.md](references/model-routing.md) — route resolution, no silent fallback, effort, layers, evidence rules.
 - [references/model-flash.md](references/model-flash.md) — the Flash default for coding, review, repair and integration.
-- [references/model-astra.md](references/model-astra.md) — native Codex Astra, deliberate high/xhigh escalation and bounded comparison.
+- [references/model-astra.md](references/model-astra.md) — Codex controller only: native Codex Astra, deliberate high/xhigh escalation and bounded comparison.
+- The `agent-bridge-routing` skill — routing between Claude Code, Codex and DSH, the no-loop chain rule and the cross-model verification protocol.
 - [references/bridge-lifecycle.md](references/bridge-lifecycle.md) — install, upgrade and uninstall boundaries for the bridge package itself.
 - [references/long-supervisor-first-edition.md](references/long-supervisor-first-edition.md) — one-round long-task supervisor: `packet.project`, supervisor-only tools, budgets, retries, callbacks and edition-1 limits.

@@ -162,6 +162,15 @@ export async function resolveCarrierToken({ env = process.env, readFileImpl = re
   }
 }
 
+/**
+ * An environment value that is present and nonblank, otherwise null. A plugin host may
+ * substitute an unset option as an empty string; blank must mean "not configured".
+ */
+export function nonBlankEnv(env, key) {
+  const value = env?.[key];
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
 /** The historical default credential path. */
 export function defaultCredentialFile(env = process.env) {
   return path.join(env?.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'codex-bridge-v1', 'bridge-token');
@@ -179,8 +188,8 @@ export function createCarrier({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFile,
-  endpoint = env?.DSH_BRIDGE_URL ?? DEFAULT_ENDPOINT,
-  credentialFile = env?.DSH_BRIDGE_CREDENTIAL_FILE ?? defaultCredentialFile(env),
+  endpoint = nonBlankEnv(env, 'DSH_BRIDGE_URL') ?? DEFAULT_ENDPOINT,
+  credentialFile = nonBlankEnv(env, 'DSH_BRIDGE_CREDENTIAL_FILE') ?? defaultCredentialFile(env),
   upstreamTimeoutMs = DEFAULT_UPSTREAM_TIMEOUT_MS,
   now = () => Date.now(),
   spawnImpl = spawn,

@@ -1,0 +1,53 @@
+{
+  "name": "agent-bridge",
+  "displayName": "Agent Bridge (DSH · Codex · Claude Code)",
+  "version": "1.4.0",
+  "description": "Controller tools for multi-harness work: delegate bounded tasks to DeepSeek Harness workers (dsh_project bridge_* tools) and consult, cross-review or appoint the other harness as sub-controller (agent_peer peer_* tools), with one root controller per task and no delegation loops.",
+  "author": { "name": "Local developer" },
+  "keywords": ["dsh", "deepseek", "codex", "multi-agent", "delegation", "cross-review"],
+  "mcpServers": {
+    "dsh_project": {
+      "command": "${user_config.node_path}",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bridge.mjs"],
+      "env": {
+        "DSH_BRIDGE_URL": "${user_config.dsh_bridge_url}",
+        "DSH_BRIDGE_CREDENTIAL_FILE": "${user_config.dsh_credential_file}"
+      }
+    },
+    "agent_peer": {
+      "command": "${user_config.node_path}",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/peer-mcp.mjs"],
+      "env": {
+        "AGENT_BRIDGE_SELF": "claude-code",
+        "AGENT_PEER_CONFIG": "${user_config.peer_config}"
+      }
+    }
+  },
+  "userConfig": {
+    "node_path": {
+      "type": "file",
+      "title": "Node.js 24 executable",
+      "description": "Absolute path of node.exe (Node 24 or later) used to run the bridge carrier and the peer server. Use plain 'node' only if it is on PATH for Claude Code.",
+      "default": "node",
+      "required": true
+    },
+    "dsh_bridge_url": {
+      "type": "string",
+      "title": "DSH bridge endpoint",
+      "description": "HTTP endpoint the DSH host mounts for the bridge.",
+      "default": "http://127.0.0.1:3080/mcp/codex-bridge-v1"
+    },
+    "dsh_credential_file": {
+      "type": "file",
+      "title": "Bridge credential file",
+      "description": "File holding the bridge bearer token. Leave empty to use DSH_MCP_TOKEN from the environment or the default $DSH_HOME/codex-bridge-v1/bridge-token.",
+      "default": ""
+    },
+    "peer_config": {
+      "type": "file",
+      "title": "agent-peer config",
+      "description": "Absolute path of the agent-peer JSON config (peer CLI executables, state directory, limits). Shared with the Codex side so both see the same job ledger.",
+      "default": ""
+    }
+  }
+}

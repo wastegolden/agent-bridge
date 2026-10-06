@@ -7,8 +7,25 @@
       ],
       "tool_timeout_sec": 75,
       "env": {
-        "DSH_BRIDGE_URL": "http://127.0.0.1:3081/mcp/codex-bridge-v1"
+        "DSH_BRIDGE_URL": "http://127.0.0.1:3080/mcp/codex-bridge-v1"
       }
+    },
+    "agent_peer": {
+      "command": "node",
+      "args": [
+        "./bin/peer-mcp.mjs"
+      ],
+      "tool_timeout_sec": 75,
+      "env": {
+        "AGENT_BRIDGE_SELF": "codex",
+        "AGENT_PEER_CONFIG": ""
+      },
+      "env_vars": [
+        "AGENT_BRIDGE_CHAIN",
+        "AGENT_BRIDGE_MAX_DEPTH",
+        "AGENT_BRIDGE_MAX_DELEGATE_DEPTH",
+        "AGENT_BRIDGE_ROOT_TASK"
+      ]
     }
   }
 }
