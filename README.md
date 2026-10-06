@@ -1,3 +1,23 @@
+# Agent Bridge 1.4.0（原 DSH Codex Bridge）
+
+1.4.0 起，本插件由 Codex 与 Claude Code 共用，并支持两者之间的跨 harness 协作：
+
+| 组成 | 作用 | 谁在用 |
+|---|---|---|
+| DSH 宿主插件（`dsh-host/`、`src/*`） | 在 DSH 内调度有边界的 Flash 任务、worktree、审查与集成，HTTP 端点 `/mcp/codex-bridge-v1` | DSH |
+| `dsh_project`（`bin/bridge.mjs`） | stdio → HTTP 转发，暴露 `bridge_*` 工具 | Codex、Claude Code |
+| `agent_peer`（`bin/peer-mcp.mjs`） | 无头调用另一个 harness：`consult`、只读 `review`、作为代理主控 `delegate` | Codex、Claude Code |
+| 唤醒 | Codex：`bin/wake-controller.mjs`；Claude Code：`bin/wake-claude.mjs`（`--wait`/`--follow` + 显式 `--ack`） | 各自主控 |
+| skills | `dsh-project-execution`（DSH 通道），`agent-bridge-routing`（分工、防套娃、多模型互证） | 两边共用 |
+
+规则：每个任务只有一个根主控（用户正在对话的那个 harness）；任务沿链向下派发、结果沿链向上返回。
+`agent_peer` 服务端强制执行：不能调用自己、不能调用链上已有的任何 harness（因此永远不会委托回主控）、
+跳数和 delegate 深度有上限；DSH worker 不能调用 Codex 或 Claude Code。插件清单：
+`.codex-plugin/plugin.json`（Codex）与 `.claude-plugin/plugin.json`（Claude Code）。持久化标识
+（`origin: codex-bridge`、端点、宿主插件 id）保持不变，旧任务库与 worktree 继续可用。变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+以下为 1.2.0/1.3.0 时期的原始说明（文中“Codex 负责……”应理解为“提交任务的主控负责……”）。
+
 # DSH Codex Bridge 1.2.0
 
 已在 DSH `0.1.7-rc.2`、Node.js `24.16.0`、Windows 上验证。更新内容和验证范围见 [CHANGELOG.md](CHANGELOG.md)（本版本不在写入范围内的说明见文末）。
