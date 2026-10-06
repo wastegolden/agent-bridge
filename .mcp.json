@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "dsh_project": {
+      "command": "node",
+      "args": [
+        "./bin/bridge.mjs"
+      ],
+      "tool_timeout_sec": 75,
+      "env": {
+        "DSH_BRIDGE_URL": "http://127.0.0.1:3081/mcp/codex-bridge-v1"
+      }
+    }
+  }
+}

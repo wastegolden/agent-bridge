@@ -1,0 +1,10 @@
+.runtime/
+.worktrees/
+node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tmp
+.env
+evidence/raw/
+

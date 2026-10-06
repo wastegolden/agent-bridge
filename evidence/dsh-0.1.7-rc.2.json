@@ -1,0 +1,35 @@
+{
+  "dsh": "0.1.7-rc.2",
+  "bridge": "1.1.0",
+  "provider": "offline fixture; no paid API calls",
+  "checks": [
+    {
+      "name": "MCP initialization, 16 tools, current Flash model catalog",
+      "passed": true
+    },
+    {
+      "name": "text: real session execution, result, stop confirmation and archive",
+      "passed": true,
+      "result": "BRIDGE_COMPAT_OK"
+    },
+    {
+      "name": "read: real session execution, result, stop confirmation and archive",
+      "passed": true,
+      "result": "{\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"<path>F:\\\\DSH\\\\.bridge-smoke-8cjjbL\\\\workspace\\\\allowed.txt</path>\\n<type>file</type>\\n<content>\\n1: BRIDGE_ALLOWED_CONTENT\\n\\n(End of file - total 1 lines)\\n</content>\"}]}"
+    },
+    {
+      "name": "denied: real session execution, result, stop confirmation and archive",
+      "passed": true,
+      "result": "{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Error: [dsh-adapter] read target \\\"F:\\\\DSH\\\\.bridge-smoke-8cjjbL\\\\outside.txt\\\" resolves outside this task's readRoots\"}]}"
+    },
+    {
+      "name": "Cancellation of an active model call confirms stopped with zero jobs",
+      "passed": true
+    },
+    {
+      "name": "Codex stdio carrier reads credential file and forwards MCP initialization",
+      "passed": true
+    }
+  ],
+  "passed": true
+}

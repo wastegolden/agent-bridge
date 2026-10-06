@@ -1,0 +1,19 @@
+{
+  "name": "dsh-codex-bridge",
+  "version": "1.3.0+codex.20261004.dsh020",
+  "description": "Bounded parallel DSH development with Codex planning, model routing and verifiable delivery",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "DSH Project Execution",
+    "shortDescription": "Plan in Codex and execute bounded parallel work in DSH.",
+    "longDescription": "Coordinate isolated coding, review and integration tasks through DSH with explicit scope, durable results and controlled cleanup.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Plan this development task, define interfaces and delegate bounded implementation to DSH."
+  },
+  "mcpServers": "./.mcp.json"
+}
