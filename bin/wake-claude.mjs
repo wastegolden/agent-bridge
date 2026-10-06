@@ -43,7 +43,9 @@ export const CLAUDE_CONTROLLER_USAGE =
 /** Default --wait bound (one hour), in milliseconds. */
 export const DEFAULT_CLAUDE_WAIT_TIMEOUT_MS = 3_600_000;
 
-const MODE_FLAGS = Object.freeze(['wait', 'follow', 'ack', 'nack', 'status']);
+// Value-less mode flags only. --ack/--nack are modes too, but they carry the event
+// id and are handled through VALUE_FLAGS so the id is consumed as their value.
+const MODE_FLAGS = Object.freeze(['wait', 'follow', 'status']);
 const VALUE_FLAGS = Object.freeze(['config', 'ack', 'nack', 'timeout-ms']);
 const CLAUDE_CONTROLLER_CONFIG_KEYS = Object.freeze([
   'stateRoot',
@@ -248,10 +250,9 @@ async function readClaudeControllerConfigFile(filePath, readFileImpl) {
 }
 
 // The running Claude Code session identity is compared only; its value is never
-// copied into a message, a log line or an error. The documented key is checked
-// first; the short alias keeps already-running monitors of either spelling bound
-// to the same opaque target label.
-const SESSION_ENV_KEYS = Object.freeze(['CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_ID']);
+// copied into a message, a log line or an error. Only the variable Claude Code
+// actually sets is accepted: an alias would be a second, unverified binding source.
+const SESSION_ENV_KEYS = Object.freeze(['CLAUDE_CODE_SESSION_ID']);
 
 function assertClaudeSessionBinding({ config, env = process.env } = {}) {
   if (config.requireSessionBinding !== true) return { required: false };
