@@ -7,8 +7,10 @@ import { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA } from './too
 export { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA };
 
 const object = properties => ({type:'object',properties,additionalProperties:false});
-// Advertised release identity (bridge 1.3.0 / adapter 0.5.0).
-export const BRIDGE_VERSION='1.3.0';
+// Advertised release identity (bridge 1.4.0 / adapter 0.5.0). 1.4.0 makes the bridge
+// controller-neutral: the controller of a task is whichever harness submitted it
+// (Codex or Claude Code). Persisted identities (origin, ownerId, endpoint) are unchanged.
+export const BRIDGE_VERSION='1.4.0';
 const str={type:'string'};const num={type:'integer'};const bool={type:'boolean'};
 const taskArgs={taskId:str};
 // Lifecycle tool shapes. Both are deliberately narrow: a clarification carries
@@ -162,7 +164,7 @@ export function createMcpHandler(service,{token,allowedHosts=['127.0.0.1','local
    let result;
    if(msg.method==='initialize'){
     const supported=['2025-06-18','2025-03-26','2024-11-05'];const requested=msg.params?.protocolVersion;
-    result={protocolVersion:supported.includes(requested)?requested:supported[0],capabilities:{tools:{}},serverInfo:{name:'dsh-codex-bridge-v1',version:BRIDGE_VERSION},instructions:'Codex owns planning and acceptance. Prefer bounded Flash implementation and review tasks. Check effective model and permissions. Use task IDs, collect full results, and confirm stopping before cleanup. Skill rules are guidance, not authorization.'};
+    result={protocolVersion:supported.includes(requested)?requested:supported[0],capabilities:{tools:{}},serverInfo:{name:'dsh-codex-bridge-v1',version:BRIDGE_VERSION},instructions:'The controller that submits a task (Codex or Claude Code; exactly one per task) owns its planning and acceptance. Prefer bounded Flash implementation and review tasks. Check effective model and permissions. Use task IDs, collect full results, and confirm stopping before cleanup. Skill rules are guidance, not authorization.'};
    }else if(msg.method==='ping')result={};
    else if(msg.method==='tools/list')result={tools:TOOLS};
    else if(msg.method==='tools/call'){

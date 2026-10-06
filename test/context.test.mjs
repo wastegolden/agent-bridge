@@ -194,7 +194,8 @@ test('recursive delegation is forbidden and owner coordination is stated', () =>
   const prompt = buildPrompt(makePacket(), { model: 'flash' });
   assert.match(prompt, /Recursive delegation is forbidden: do not spawn subagents, sub-tasks or child sessions/);
   assert.match(prompt, /You implement or investigate only what this task authorises; you do not re-scope it/);
-  assert.match(prompt, /The owner \(Codex\) is the coordinator/);
+  assert.match(prompt, /The owner \(the controller that submitted this task\) is the coordinator/);
+  assert.doesNotMatch(prompt, /Codex/, 'the worker prompt is controller-neutral');
   assert.match(prompt, /Do not call back into the coordinator runtime/);
 });
 

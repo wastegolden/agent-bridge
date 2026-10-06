@@ -14,7 +14,8 @@
 //   * Acceptance criteria are reproduced precisely and in order.
 //   * Fact / inference / unknown are kept distinct, and the model is never authorised
 //     to claim execution evidence for its own assertions.
-//   * Recursive delegation is forbidden and the owner (Codex) remains coordinator.
+//   * Recursive delegation is forbidden and the owner (the submitting controller,
+//     Codex or Claude Code) remains coordinator.
 //   * Skill layers common -> role -> model are ordered and cannot expand task
 //     authorization.
 //   * The understanding gate asks for understanding/assumptions/actions/missing and
@@ -679,7 +680,7 @@ const INTEGRITY_RULES = [
 
 const COORDINATION_RULES = [
   'COORDINATION:',
-  '- The owner (Codex) is the coordinator: it owns contracts, task state, review and integration.',
+  '- The owner (the controller that submitted this task) is the coordinator: it owns contracts, task state, review and integration.',
   '- You implement or investigate only what this task authorises; you do not re-scope it.',
   '- Recursive delegation is forbidden: do not spawn subagents, sub-tasks or child sessions.',
   '- Do not call back into the coordinator runtime; report findings to the owner instead.',
