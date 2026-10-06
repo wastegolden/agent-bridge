@@ -35,8 +35,8 @@ relaxed assertions, or a passing test that asserts nothing are review findings.
 ## When to escalate
 
 For this user's installation, escalation must preserve the Flash-only DSH route.
-Narrow the task, provide concrete failure evidence, or return it to Codex for
-inspection. Do not select Pro or another DSH model unless the user explicitly
+Narrow the task, provide concrete failure evidence, or return it to the controller
+for inspection. Do not select Pro or another DSH model unless the user explicitly
 changes the restriction. The general guidance below applies only within that
 authorization.
 

@@ -8,9 +8,9 @@ or ask the user again. Repair follows the same boundaries as the original task.
 - Default implementation **and** repair is bounded
   `deepseek-official/deepseek-flash`, confirmed from `bridge_models` before each
   submit; treat the model reference as guidance, not as a catalog.
-- Native Astra reviewers run directly in Codex with their own model/effort controls.
-  They are never forwarded into DSH, and no DSH task is routed to a Codex provider.
-  Keep the two routes separate.
+- When Codex is the controller, native Astra reviewers run directly in Codex with
+  their own model/effort controls. They are never forwarded into DSH, and no DSH
+  task is routed to a Codex provider. Keep the two routes separate.
 - No silent model or effort switch. A repair that wants a different route names the
   provider, model and effort explicitly, with the evidence that justifies it.
 - Escalation is per task, explicit and evidence-based. It never happens through a
@@ -135,7 +135,8 @@ Stop the loop and report when:
 
 Report the evidence, the rounds attempted and the concrete reason a different
 boundary or authority is required. Escalate explicitly to a higher-effort route
-(native Astra under Codex, or another explicitly named route) or return to the owner.
+(native Astra under Codex when Codex is the controller, or another explicitly named
+route) or return to the owner.
 Never repeat an ineffective retry, and never launder a route change as a "retry".
 
 ## Records

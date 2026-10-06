@@ -1,5 +1,9 @@
 # Astra high/xhigh — native Codex comparison
 
+This note applies only when Codex is the controller; a Claude Code controller uses
+its own native subagents under the same rule, and those native subagents run under
+the controller's own model controls and are never forwarded into DSH.
+
 Astra runs as a native Codex subagent when the user explicitly chooses it.
 DeepSeek Flash runs through the DSH bridge. Keep these execution routes separate:
 do not add a Codex model provider to DSH, and do not forward an explicitly

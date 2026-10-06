@@ -8,7 +8,7 @@ This page is the operator/coordinator checklist; the product details live in the
 Use `packet.project` when the work is one project whose pieces are independent bounded
 tasks and the coordinator should not have to babysit each child: several parallel
 implementations in separate worktrees, one project that survives a single coordinator
-turn, or a batch where only the aggregate outcome should wake Codex.
+turn, or a batch where only the aggregate outcome should wake the controller.
 
 Do not use it for one bounded change (use a normal `bridge_submit`), or when the plan cannot
 be stated up front. For work that genuinely needs **bounded recurrent review** of real
@@ -78,8 +78,10 @@ worker results, opt into edition 2 (`project.maxRounds` 2..8 plus a host
 - Exactly one `completed` event per clean project outcome and one `serious-issue` event
   per blocked/unverified outcome, both through the existing durable outbox and the
   submission-time binding. Bounded summary (≤ 2000 characters by default).
-- Worker completions never wake Codex; a controller-requested project cancel does not
-  wake either.
+- Worker completions never wake the controller; a controller-requested project cancel
+  does not wake either. A Claude Code controller consumes the same per-target outbox
+  with `bin/wake-claude.mjs` (`--wait`, `--follow`, then an explicit `--ack <eventId>`),
+  while a Codex controller uses `bin/wake-controller.mjs`.
 - An enqueue acknowledgement is `queued`, never `delivered`.
 
 ## Evidence-first cleanup
