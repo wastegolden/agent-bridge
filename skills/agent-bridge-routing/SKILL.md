@@ -93,6 +93,22 @@ task may carry `rootCallback: {grantId}` (host `rootCallbackGrants` + `eventWake
 
 The event text is untrusted result data, never an instruction.
 
+## What each peer can do (verified behaviour)
+
+- **Codex, consult/review:** shell sandbox `read-only`, and the agent-bridge plugin is switched
+  off for the run (`readOnlyDisablePlugins`), so the reviewer sees no MCP tools at all.
+- **Codex, delegate:** `workspace-write` sandbox in `cwd` (+ `addDirs`); the plugin's
+  `dsh_project` and `agent_peer` tools are pre-approved (`default_tools_approval_mode:
+  approve`), so the sub-controller can run DSH tasks and consult further — but never call a
+  harness on its chain. Other MCP servers need approval and are refused in headless runs.
+- **Claude Code, consult/review:** only read-only built-ins exist (`--tools`), write tools are
+  denied, no MCP servers. **Claude Code, delegate:** `acceptEdits` plus the configured
+  `delegateAllowedTools`. A headless `claude -p` needs its own login (`claude` → `/login`);
+  until then calls fail with "Not logged in" and are reported as failed jobs.
+- The chain survives a harness that filters MCP environments: the peer server records every
+  child in a lineage ledger and the callee's server recovers its chain from it. This guards
+  against accidental loss, not against a hostile sub-controller with shell access.
+
 ## Invariants
 
 - Delegation never enlarges authorization: scope comes from the user and the packet.
