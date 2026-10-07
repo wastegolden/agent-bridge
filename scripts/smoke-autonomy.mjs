@@ -494,15 +494,15 @@ async function main() {
       capabilities: {},
       clientInfo: { name: 'autonomy-smoke', version: '1' },
     });
-    await check('the installed DSH host mounts the 1.4.0 bridge over normal MCP', () => {
-      assert.equal(initialized.serverInfo.version, '1.4.0');
+    await check('the installed DSH host mounts the 1.5.0 bridge over normal MCP', () => {
+      assert.equal(initialized.serverInfo.version, '1.5.0');
       return { serverInfo: initialized.serverInfo };
     });
 
     const capabilities = await callA('bridge_capabilities');
     await check('capabilities report the real integrated producer, the granted seams and the configured 16', () => {
       assert.equal(capabilities.maxConcurrent, 16, 'the configured production concurrency is preserved');
-      assert.equal(capabilities.version, '1.4.0');
+      assert.equal(capabilities.version, '1.5.0');
       assert.equal(capabilities.adapterVersion, '0.5.0');
       assert.equal(capabilities.eventWake?.producer, true, 'the mount must report its real eventWake producer');
       assert.equal(capabilities.eventWake?.outboxConfigured, true);

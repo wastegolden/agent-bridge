@@ -7,10 +7,10 @@ import { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA } from './too
 export { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA };
 
 const object = properties => ({type:'object',properties,additionalProperties:false});
-// Advertised release identity (bridge 1.4.0 / adapter 0.5.0). 1.4.0 makes the bridge
+// Advertised release identity (bridge 1.5.0 / adapter 0.5.0). 1.4.0 makes the bridge
 // controller-neutral: the controller of a task is whichever harness submitted it
 // (Codex or Claude Code). Persisted identities (origin, ownerId, endpoint) are unchanged.
-export const BRIDGE_VERSION='1.4.0';
+export const BRIDGE_VERSION='1.5.0';
 const str={type:'string'};const num={type:'integer'};const bool={type:'boolean'};
 const taskArgs={taskId:str};
 // Lifecycle tool shapes. Both are deliberately narrow: a clarification carries
