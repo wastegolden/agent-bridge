@@ -205,13 +205,42 @@ test('a versioned executable pattern resolves to the newest installed copy', asy
         await utimes(file, when, when);
       }
     }
+    // The Claude desktop app nests a content hash under the version dir: <version>/<hash>/claude.exe.
+    for (const [version, hash, when] of [['2.1.284', 'aaa', 1_600_000_000], ['2.1.289', 'bbb', 1_850_000_000]]) {
+      await mkdir(path.join(dir, version, hash), { recursive: true });
+      const file = path.join(dir, version, hash, 'claude.exe');
+      await writeFile(file, 'x');
+      await utimes(file, when, when);
+    }
+    await mkdir(path.join(dir, '2.1.289', 'ccc'), { recursive: true }); // a hash directory without an executable
     const configPath = path.join(dir, 'peer.json');
     await writeFile(configPath, JSON.stringify({ schemaVersion: 1, stateDir: dir, peers: { 'claude-code': { executable: `${dir.replaceAll('\\', '/')}/*/claude.exe` } } }));
     const config = await loadPeerConfig({ env: { AGENT_PEER_CONFIG: configPath } });
     assert.equal(config.peers['claude-code'].executable, path.join(dir, '2.1.284', 'claude.exe'));
     assert.equal(await resolveExecutablePattern(path.join(dir, 'plain.exe')), path.join(dir, 'plain.exe'));
+    assert.equal(await resolveExecutablePattern(`${dir}/*/*/claude.exe`), path.join(dir, '2.1.289', 'bbb', 'claude.exe'));
     await assert.rejects(resolveExecutablePattern(`${dir}/*/missing.exe`), { code: 'PEER_CONFIG_INVALID' });
-    await assert.rejects(resolveExecutablePattern(`${dir}/*/*/claude.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern(`${dir}/*/*/missing.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern(`${dir}/ab*/claude.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern(`${dir}/*/ab*/claude.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern(`${dir}/*/*/*/*/*/claude.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern('*/claude.exe'), { code: 'PEER_CONFIG_INVALID' });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an executable pattern breaks an mtime tie with the greatest path', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-peer-exe-tie-'));
+  try {
+    const when = 1_750_000_000;
+    for (const hash of ['zzz', 'aaa']) {
+      await mkdir(path.join(dir, '2.1.289', hash), { recursive: true });
+      const file = path.join(dir, '2.1.289', hash, 'claude.exe');
+      await writeFile(file, 'x');
+      await utimes(file, when, when);
+    }
+    assert.equal(await resolveExecutablePattern(`${dir}/*/*/claude.exe`), path.join(dir, '2.1.289', 'zzz', 'claude.exe'));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

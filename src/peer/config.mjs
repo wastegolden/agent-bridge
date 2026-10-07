@@ -254,39 +254,85 @@ export function normalizePeerConfig(raw) {
   });
 }
 
+/** The most whole `*` segments one executable pattern may use. */
+const MAX_EXECUTABLE_PATTERN_WILDCARDS = 4;
+/** The most directories one executable pattern may enumerate before it is refused. */
+const MAX_EXECUTABLE_PATTERN_DIRECTORIES = 2000;
+
 /**
- * Resolve an executable pattern with exactly one `*` path segment (an app-managed
- * version or hash directory, e.g. `.../claude-code/* /claude.exe`) to the newest
- * matching existing file. A plain path is returned unchanged.
+ * Resolve an executable pattern whose whole `*` path segments each match exactly one
+ * app-managed directory level — the Claude desktop layout needs two, a version and then
+ * a content hash, e.g. `.../claude-code/* / * /claude.exe` — to the newest matching
+ * existing file. A segment that carries `*` next to other characters (`ab*`) is refused.
+ * A plain path is returned unchanged.
  */
 export async function resolveExecutablePattern(pattern, { readdirImpl = readdir, statImpl = stat } = {}) {
   if (typeof pattern !== 'string' || !pattern.includes('*')) return pattern;
   const segments = pattern.split(/[\\/]+/);
-  const star = segments.indexOf('*');
-  if (star <= 0 || segments.filter((segment) => segment.includes('*')).length !== 1) {
-    fail('an executable pattern may contain exactly one whole "*" path segment', 'executable');
+  if (segments.some((segment) => segment !== '*' && segment.includes('*'))) {
+    fail('an executable pattern may only use whole "*" path segments', 'executable');
   }
-  const parent = segments.slice(0, star).join(path.sep) || path.sep;
-  const rest = segments.slice(star + 1);
-  let candidates = [];
-  try {
-    candidates = await readdirImpl(parent, { withFileTypes: true });
-  } catch {
-    fail(`executable pattern parent ${parent} is not readable`, 'executable');
+  const wildcards = segments.filter((segment) => segment === '*').length;
+  if (segments[0] === '*' || wildcards > MAX_EXECUTABLE_PATTERN_WILDCARDS) {
+    fail(`an executable pattern needs a literal first path segment and at most ${MAX_EXECUTABLE_PATTERN_WILDCARDS} whole "*" path segments`, 'executable');
+  }
+  const firstWildcard = segments.indexOf('*');
+  // One step per wildcard level, plus one step per literal run between two wildcards:
+  // the run before the first wildcard is the literal parent, a trailing run names the file.
+  const steps = [];
+  for (let index = firstWildcard; index < segments.length; index += 1) {
+    if (segments[index] === '*') {
+      steps.push(null);
+      continue;
+    }
+    const run = [segments[index]];
+    while (index + 1 < segments.length && segments[index + 1] !== '*') {
+      index += 1;
+      run.push(segments[index]);
+    }
+    steps.push(run);
+  }
+  let frontier = [segments.slice(0, firstWildcard).join(path.sep) || path.sep];
+  let visited = 0;
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    if (step !== null) {
+      frontier = frontier.map((dir) => path.join(dir, ...step));
+      continue;
+    }
+    // Only the first wildcard reads a literal parent: its failure is a configuration error.
+    const literalParent = index === 0;
+    const next = [];
+    for (const dir of frontier) {
+      visited += 1;
+      if (visited > MAX_EXECUTABLE_PATTERN_DIRECTORIES) {
+        fail(`an executable pattern may visit at most ${MAX_EXECUTABLE_PATTERN_DIRECTORIES} directories`, 'executable');
+      }
+      let entries;
+      try {
+        entries = await readdirImpl(dir, { withFileTypes: true });
+      } catch {
+        if (literalParent) fail(`executable pattern parent ${dir} is not readable`, 'executable');
+        continue; // an unreadable directory at a wildcard level is skipped
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) next.push(path.join(dir, entry.name));
+      }
+    }
+    frontier = next;
   }
   const found = [];
-  for (const entry of candidates) {
-    if (!entry.isDirectory()) continue;
-    const file = path.join(parent, entry.name, ...rest);
+  for (const file of frontier) {
     try {
       const info = await statImpl(file);
       if (info.isFile()) found.push({ file, mtimeMs: info.mtimeMs });
     } catch {
-      // this version directory has no such executable
+      // this candidate has no such executable
     }
   }
   if (found.length === 0) fail(`no executable matches ${pattern}`, 'executable');
-  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  // Newest mtime wins; equal timestamps fall back to the greatest path for a stable result.
+  found.sort((a, b) => (b.mtimeMs - a.mtimeMs) || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
   return found[0].file;
 }
 
