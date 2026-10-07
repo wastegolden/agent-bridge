@@ -12,17 +12,26 @@
 //     "codex":       { "executable": "C:/.../codex.exe", "reasoningEffort": "high" },
 //     "claude-code": { "executable": "C:/.../claude.exe", "delegatePermissionMode": "acceptEdits" }
 //   },
-//   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3, "maxPromptChars": 200000 }
+//   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3, "maxPromptChars": 200000 },
+//   "records": {
+//     "enabled": true, "dirName": ".agent-bridge/records", "retainDays": 3,
+//     "disputedRetainDays": 30, "sweepIntervalMinutes": 60,
+//     "claudeProjectsDir": "C:/Users/me/.claude/projects"
+//   },
+//   "bridge": { "url": "http://127.0.0.1:3080/mcp", "credentialFile": "C:/.../token" }
 // }
 //
 // There is deliberately no free-form argument list: every CLI flag is derived from a
 // validated field, so configuration can never re-open a read-only sandbox.
 
 import { readdir, readFile, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
+import { isLocalBridgeUrl } from './bridge-client.mjs';
 import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_PLUGIN_ID_RE, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
 import { PEER_TARGETS, PeerPolicyError } from './chain.mjs';
+import { DEFAULT_DISPUTED_RETAIN_DAYS, DEFAULT_RECORD_DIR, DEFAULT_RETAIN_DAYS } from './records.mjs';
 
 export const CONFIG_ENV = 'AGENT_PEER_CONFIG';
 export const PEER_CONFIG_SCHEMA_VERSION = 1;
@@ -37,12 +46,24 @@ export const DEFAULT_LIMITS = Object.freeze({
   maxWaitMs: 55_000,
 });
 
-const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits'];
+/** Codex thread section a finished peer job is moved into unless configured otherwise. */
+export const DEFAULT_THREAD_SECTION = 'Agent Bridge';
+/** Prefix of the thread name a finished peer job is renamed to. */
+export const DEFAULT_THREAD_NAME_PREFIX = '[agent-bridge]';
+export const MAX_THREAD_NAME_PREFIX_CHARS = 40;
+export const MAX_THREAD_SECTION_CHARS = 200;
+/** Default sweep cadence for the retention sweeper, in minutes (0 disables the timer). */
+export const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
+
+const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits', 'records', 'bridge'];
 const PEER_KEYS = {
-  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins'],
+  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins', 'threadSection', 'threadNamePrefix'],
   'claude-code': ['executable', 'enabled', 'model', 'effort', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
 };
 const LIMIT_KEYS = Object.keys(DEFAULT_LIMITS);
+const RECORD_KEYS = ['enabled', 'dirName', 'retainDays', 'disputedRetainDays', 'sweepIntervalMinutes', 'claudeProjectsDir'];
+const BRIDGE_KEYS = ['url', 'credentialFile'];
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
 function fail(message, field) {
   throw new PeerPolicyError('PEER_CONFIG_INVALID', message, { field });
@@ -89,6 +110,73 @@ function positiveInt(value, field) {
   return value;
 }
 
+function nonNegativeInt(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) fail(`${field} must be an integer >= 0`, field);
+  return value;
+}
+
+function booleanValue(value, fallback, field) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') fail(`${field} must be a boolean`, field);
+  return value;
+}
+
+/** A relative directory that can never escape the project root (`..`, absolute, drive). */
+function relativeDirName(value, fallback, field) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || value.trim() === '' || CONTROL_CHAR_RE.test(value)) {
+    fail(`${field} must be a nonempty relative path`, field);
+  }
+  const normalized = path.normalize(value);
+  if (path.isAbsolute(value) || /^[A-Za-z]:/.test(value) || normalized === '..' || normalized.startsWith(`..${path.sep}`)) {
+    fail(`${field} must be a relative path that stays inside the project root`, field);
+  }
+  return value;
+}
+
+/** A nonblank, bounded, control-character-free name. */
+function boundedName(value, maxChars, field) {
+  if (typeof value !== 'string' || value.trim() === '' || value.length > maxChars || CONTROL_CHAR_RE.test(value)) {
+    fail(`${field} must be a nonblank string of at most ${maxChars} characters without control characters`, field);
+  }
+  return value;
+}
+
+function normalizeRecordsConfig(value) {
+  const records = {
+    enabled: true,
+    dirName: DEFAULT_RECORD_DIR,
+    retainDays: DEFAULT_RETAIN_DAYS,
+    disputedRetainDays: DEFAULT_DISPUTED_RETAIN_DAYS,
+    sweepIntervalMinutes: DEFAULT_SWEEP_INTERVAL_MINUTES,
+    claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'),
+  };
+  if (value === undefined || value === null) return records;
+  if (!isPlainObject(value)) fail('records must be an object', 'records');
+  onlyKeys(value, RECORD_KEYS, 'records');
+  records.enabled = booleanValue(value.enabled, records.enabled, 'records.enabled');
+  records.dirName = relativeDirName(value.dirName, records.dirName, 'records.dirName');
+  if (value.retainDays !== undefined) records.retainDays = positiveInt(value.retainDays, 'records.retainDays');
+  if (value.disputedRetainDays !== undefined) records.disputedRetainDays = positiveInt(value.disputedRetainDays, 'records.disputedRetainDays');
+  if (value.sweepIntervalMinutes !== undefined) records.sweepIntervalMinutes = nonNegativeInt(value.sweepIntervalMinutes, 'records.sweepIntervalMinutes');
+  if (value.claudeProjectsDir !== undefined) records.claudeProjectsDir = absolute(value.claudeProjectsDir, 'records.claudeProjectsDir');
+  return records;
+}
+
+/** The local DSH bridge endpoint, or null when the operator configured none. */
+function normalizeBridgeConfig(value) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value)) fail('bridge must be an object', 'bridge');
+  onlyKeys(value, BRIDGE_KEYS, 'bridge');
+  if (!isLocalBridgeUrl(value.url)) {
+    fail('bridge.url must be http://127.0.0.1 or http://localhost (any port or path)', 'bridge.url');
+  }
+  const credentialFile = value.credentialFile === undefined || value.credentialFile === null
+    ? null
+    : absolute(value.credentialFile, 'bridge.credentialFile');
+  return { url: value.url.trim(), credentialFile };
+}
+
 export function normalizePeerConfig(raw) {
   if (!isPlainObject(raw)) fail('peer config must be a JSON object', 'config');
   onlyKeys(raw, TOP_KEYS, 'config');
@@ -121,6 +209,15 @@ export function normalizePeerConfig(raw) {
       if (typeof peer.readOnlyIgnoreUserConfig !== 'boolean') fail('peers.codex.readOnlyIgnoreUserConfig must be a boolean', 'peers.codex.readOnlyIgnoreUserConfig');
       peer.readOnlyDisablePlugins = stringList(value.readOnlyDisablePlugins, 'peers.codex.readOnlyDisablePlugins') ?? [];
       if (peer.readOnlyDisablePlugins.some((id) => !CODEX_PLUGIN_ID_RE.test(id))) fail('peers.codex.readOnlyDisablePlugins must hold plugin ids like name@marketplace', 'peers.codex.readOnlyDisablePlugins');
+      // null disables thread grouping entirely; a string names the section to move into.
+      peer.threadSection = value.threadSection === undefined
+        ? DEFAULT_THREAD_SECTION
+        : value.threadSection === null
+          ? null
+          : boundedName(value.threadSection, MAX_THREAD_SECTION_CHARS, 'peers.codex.threadSection');
+      peer.threadNamePrefix = value.threadNamePrefix === undefined
+        ? DEFAULT_THREAD_NAME_PREFIX
+        : boundedName(value.threadNamePrefix, MAX_THREAD_NAME_PREFIX_CHARS, 'peers.codex.threadNamePrefix');
     } else {
       peer.effort = optionalEnum(value.effort, CLAUDE_EFFORTS, 'peers.claude-code.effort');
       peer.fallbackModel = optionalModel(value.fallbackModel, 'peers.claude-code.fallbackModel');
@@ -145,7 +242,16 @@ export function normalizePeerConfig(raw) {
   if (limits.maxTimeoutMs > MAX_TIMER_MS) fail(`limits.maxTimeoutMs must be at most ${MAX_TIMER_MS}`, 'limits.maxTimeoutMs');
   if (limits.timeoutMs > limits.maxTimeoutMs) fail('limits.timeoutMs must not exceed limits.maxTimeoutMs', 'limits.timeoutMs');
   if (limits.maxWaitMs > 600_000) fail('limits.maxWaitMs must be at most 600000', 'limits.maxWaitMs');
-  return Object.freeze({ schemaVersion: PEER_CONFIG_SCHEMA_VERSION, stateDir, peers: Object.freeze(peers), limits: Object.freeze(limits) });
+  const records = normalizeRecordsConfig(raw.records);
+  const bridge = normalizeBridgeConfig(raw.bridge);
+  return Object.freeze({
+    schemaVersion: PEER_CONFIG_SCHEMA_VERSION,
+    stateDir,
+    peers: Object.freeze(peers),
+    limits: Object.freeze(limits),
+    records: Object.freeze(records),
+    bridge: bridge === null ? null : Object.freeze(bridge),
+  });
 }
 
 /**

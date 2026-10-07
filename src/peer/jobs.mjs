@@ -140,6 +140,7 @@ export function createPeerJobs({
   shutdownGraceMs = 10_000,
   lineage = true,
   logger = () => {},
+  onSettled = null,
 } = {}) {
   if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'stateDir must be absolute', { field: 'stateDir' });
   const jobsDir = path.join(stateDir, 'jobs');
@@ -300,6 +301,18 @@ export function createPeerJobs({
     for (const wake of entry.waiters) wake();
     entry.waiters.clear();
     entry.resolveSettled();
+    // Observed after the job is settled and persisted. It is never awaited: a slow or
+    // failing observer must not delay the terminal state or change it in any way.
+    if (typeof onSettled === 'function') {
+      try {
+        const observed = onSettled(snapshot(record));
+        if (observed && typeof observed.then === 'function') {
+          observed.then(undefined, (error) => logger({ phase: 'onSettled', jobId: record.jobId, code: error?.code ?? 'E_ON_SETTLED' }));
+        }
+      } catch (error) {
+        logger({ phase: 'onSettled', jobId: record.jobId, code: error?.code ?? 'E_ON_SETTLED' });
+      }
+    }
   }
 
   /** Reserve a job id and its directory paths before the invocation is built. */

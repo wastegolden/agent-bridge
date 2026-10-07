@@ -123,9 +123,9 @@ test('codex invocations keep review read-only and pin the sandbox last', () => {
   assert.throws(() => normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), readOnlyDisablePlugins: ['x".enabled=true #'] } } }), { code: 'PEER_CONFIG_INVALID' });
 });
 
-test('claude review exposes only read-only built-ins, no MCP, and denies write tools', () => {
+test('claude review exposes only read-only built-ins, no MCP, denies write tools and keeps no session', () => {
   const review = buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS }, claudePeer());
-  assert.deepEqual(review.args.slice(0, 3), ['-p', '--output-format', 'json']);
+  assert.deepEqual(review.args.slice(0, 4), ['-p', '--output-format', 'json', '--no-session-persistence']);
   const at = (flag) => review.args.indexOf(flag);
   assert.ok(at('--strict-mcp-config') > 0);
   assert.equal(review.args[at('--permission-mode') + 1], 'dontAsk');
@@ -134,9 +134,12 @@ test('claude review exposes only read-only built-ins, no MCP, and denies write t
   for (const name of ['Write', 'Edit', 'Bash', 'PowerShell', 'NotebookEdit']) assert.ok(denied.includes(name), name);
   assert.deepEqual(denied, [...CLAUDE_WRITE_TOOLS]);
   assert.equal(review.args[review.args.indexOf('--effort') + 1], 'high');
+  const consult = buildInvocation({ target: 'claude-code', mode: 'consult', cwd: ABS }, claudePeer());
+  assert.equal(consult.args.includes('--no-session-persistence'), true, 'a read-only consult leaves no session behind either');
   const delegate = buildInvocation({ target: 'claude-code', mode: 'delegate', cwd: ABS, sessionId: 'a73c13c2-5006-4731-b1d3-93a817b735bc' }, claudePeer());
   assert.deepEqual(delegate.args.slice(-2), ['--permission-mode', 'acceptEdits']);
   assert.ok(!delegate.args.includes('--strict-mcp-config'), 'a sub-controller keeps its MCP tools (DSH bridge, peers)');
+  assert.ok(!delegate.args.includes('--no-session-persistence'), 'a delegate session is persisted so it can be continued');
   assert.equal(delegate.args[delegate.args.indexOf('--resume') + 1], 'a73c13c2-5006-4731-b1d3-93a817b735bc');
 });
 
@@ -238,7 +241,7 @@ async function withServer(env, fn, { maxConcurrent = 3, killTree, resolveLineage
       return killTree ? killTree(pid) : defaultKillTree(pid);
     },
   });
-  const server = createPeerServer({ env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, CLAUDECODE: '1', CODEX_THREAD_ID: 'caller', ...env }, config, jobs, resolveLineage });
+  const server = createPeerServer({ env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, CLAUDECODE: '1', CODEX_THREAD_ID: 'caller', ...env }, config, jobs, resolveLineage, startSweepTimer: false });
   try {
     await fn({ server, jobs, work, dir, config, kills });
   } finally {
@@ -259,7 +262,7 @@ test('mcp handshake, catalog and strict JSON-RPC envelopes', async () => {
     const init = await server.handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(init.result.serverInfo.name, 'agent-peer');
     const list = await server.handle({ jsonrpc: '2.0', id: 'two', method: 'tools/list' });
-    assert.deepEqual(list.result.tools.map((t) => t.name), ['peer_capabilities', 'peer_ask', 'peer_check', 'peer_result', 'peer_cancel', 'peer_list']);
+    assert.deepEqual(list.result.tools.map((t) => t.name), ['peer_capabilities', 'peer_ask', 'peer_check', 'peer_result', 'peer_cancel', 'peer_list', 'record_closeout', 'record_list', 'cleanup_run']);
     assert.equal(list.id, 'two');
     assert.equal(await server.handle({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
     assert.equal((await server.handle({ jsonrpc: '2.0', id: null, method: 'ping' })).error.code, -32600);
@@ -316,7 +319,7 @@ test('another controller session sharing the ledger cannot take over a peer sess
     assert.match(mine.job.rootTask, /^session-/, 'a root without an explicit label gets its own session label');
     const own = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'again', cwd: work, sessionId: mine.job.sessionId, waitMs: 20_000 });
     assert.equal(own.job.status, 'completed', 'the same controller session continues its own peer session');
-    const other = createPeerServer({ env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, AGENT_BRIDGE_SELF: 'claude-code' }, config, jobs });
+    const other = createPeerServer({ env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, AGENT_BRIDGE_SELF: 'claude-code' }, config, jobs, startSweepTimer: false });
     const stolen = await rpc(other, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, sessionId: mine.job.sessionId });
     assert.equal(stolen.error.code, 'PEER_SESSION_FOREIGN');
   });
@@ -548,7 +551,7 @@ test('bin/peer-mcp.mjs speaks MCP over real stdio and exits when stdin closes', 
     assert.equal(await exited, 0);
     assert.equal(replies.find((r) => r.id === 1).result.serverInfo.name, 'agent-peer');
     assert.equal(replies.find((r) => r.id === null).error.code, -32700);
-    assert.equal(replies.find((r) => r.id === 2).result.tools.length, 6);
+    assert.equal(replies.find((r) => r.id === 2).result.tools.length, 9);
     const caps = replies.find((r) => r.id === 3).result.structuredContent;
     assert.equal(caps.self, 'claude-code');
     assert.equal(caps.isRootController, true);

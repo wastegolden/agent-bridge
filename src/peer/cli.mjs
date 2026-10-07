@@ -13,8 +13,8 @@
 //   codex       codex exec --json --skip-git-repo-check [-m M] [-c model_reasoning_effort=E]
 //                 [-p PROFILE] [--ignore-user-config] -o <file> -s <sandbox> -C <cwd> [--add-dir D]... -
 //               codex exec resume ... -o <file> -c sandbox_mode="<s>" <id> -
-//   claude-code claude -p --output-format json [--resume ID] [--model M] [--effort E]
-//                 [--fallback-model F] [--add-dir D]... <permission flags>
+//   claude-code claude -p --output-format json [--no-session-persistence] [--resume ID]
+//                 [--model M] [--effort E] [--fallback-model F] [--add-dir D]... <permission flags>
 //
 // Read-only (consult/review):
 //   codex   -s read-only (shell sandbox). MCP servers configured in the user's Codex
@@ -23,7 +23,8 @@
 //   claude  --tools <read-only built-ins> (nothing else exists in the session, so a
 //           pre-approved Write/Bash rule in settings has nothing to approve),
 //           --disallowedTools <write tools>, --strict-mcp-config (no MCP servers),
-//           --permission-mode dontAsk.
+//           --permission-mode dontAsk, --no-session-persistence (a read-only peer leaves
+//           no resumable session behind).
 
 import path from 'node:path';
 
@@ -166,6 +167,9 @@ export function buildInvocation(request, peer) {
     const args = [
       '-p',
       '--output-format', 'json',
+      // A read-only peer (consult/review) leaves no session behind, so there is nothing
+      // to resume later; the flag sits directly after --output-format json.
+      ...(readOnly ? ['--no-session-persistence'] : []),
       ...(sessionId !== null ? ['--resume', sessionId] : []),
       ...(model ? ['--model', model] : []),
       ...(peer.effort ? ['--effort', peer.effort] : []),
