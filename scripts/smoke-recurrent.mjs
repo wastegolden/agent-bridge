@@ -391,7 +391,7 @@ async function main() {
       assert.ok(caps.supervisorProjects.tools.includes('dsh_supervisor_project_complete'));
       assert.ok(caps.supervisorProjects.tools.includes('dsh_supervisor_project_block'));
       const tools = await rpc(first.endpoint, first.token, 'tools/list', {});
-      assert.equal(tools.tools.length, 18);
+      assert.equal(tools.tools.length, 19);
       assert.ok(tools.tools.some((entry) => entry.name === 'bridge_pause'));
       assert.ok(tools.tools.some((entry) => entry.name === 'bridge_resume'));
       const packet = tools.tools.find((entry) => entry.name === 'bridge_submit').inputSchema.properties.packet;

@@ -66,7 +66,7 @@ try {
   assert.ok(endpoint,'DSH startup timed out');
   const initialized=await rpc('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'compat-smoke',version:'1'}});
   assert.equal(initialized.serverInfo.version,report.bridge);
-  const tools=await rpc('tools/list',{});assert.equal(tools.tools.length,18);
+  const tools=await rpc('tools/list',{});assert.equal(tools.tools.length,19);
   const catalog=await call('bridge_models');
   assert.match(JSON.stringify(catalog),/deepseek-flash/);
   report.checks.push({name:'MCP initialization, 18 tools, current Flash model catalog',passed:true});
