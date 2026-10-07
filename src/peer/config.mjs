@@ -18,7 +18,7 @@
 // There is deliberately no free-form argument list: every CLI flag is derived from a
 // validated field, so configuration can never re-open a read-only sandbox.
 
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
@@ -146,7 +146,43 @@ export function normalizePeerConfig(raw) {
   return Object.freeze({ schemaVersion: PEER_CONFIG_SCHEMA_VERSION, stateDir, peers: Object.freeze(peers), limits: Object.freeze(limits) });
 }
 
-export async function loadPeerConfig({ env = process.env, readFileImpl = readFile } = {}) {
+/**
+ * Resolve an executable pattern with exactly one `*` path segment (an app-managed
+ * version or hash directory, e.g. `.../claude-code/* /claude.exe`) to the newest
+ * matching existing file. A plain path is returned unchanged.
+ */
+export async function resolveExecutablePattern(pattern, { readdirImpl = readdir, statImpl = stat } = {}) {
+  if (typeof pattern !== 'string' || !pattern.includes('*')) return pattern;
+  const segments = pattern.split(/[\\/]+/);
+  const star = segments.indexOf('*');
+  if (star <= 0 || segments.filter((segment) => segment.includes('*')).length !== 1) {
+    fail('an executable pattern may contain exactly one whole "*" path segment', 'executable');
+  }
+  const parent = segments.slice(0, star).join(path.sep) || path.sep;
+  const rest = segments.slice(star + 1);
+  let candidates = [];
+  try {
+    candidates = await readdirImpl(parent, { withFileTypes: true });
+  } catch {
+    fail(`executable pattern parent ${parent} is not readable`, 'executable');
+  }
+  const found = [];
+  for (const entry of candidates) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(parent, entry.name, ...rest);
+    try {
+      const info = await statImpl(file);
+      if (info.isFile()) found.push({ file, mtimeMs: info.mtimeMs });
+    } catch {
+      // this version directory has no such executable
+    }
+  }
+  if (found.length === 0) fail(`no executable matches ${pattern}`, 'executable');
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return found[0].file;
+}
+
+export async function loadPeerConfig({ env = process.env, readFileImpl = readFile, resolveExecutable = resolveExecutablePattern } = {}) {
   const file = env?.[CONFIG_ENV];
   if (typeof file !== 'string' || file.trim() === '') fail(`${CONFIG_ENV} must name the peer config file`, CONFIG_ENV);
   const configPath = absolute(file.trim(), CONFIG_ENV);
@@ -161,6 +197,13 @@ export async function loadPeerConfig({ env = process.env, readFileImpl = readFil
     parsed = JSON.parse(String(text).replace(/^\uFEFF/, ''));
   } catch {
     fail('the peer config file is not valid JSON', CONFIG_ENV);
+  }
+  if (isPlainObject(parsed?.peers)) {
+    for (const peer of Object.values(parsed.peers)) {
+      if (isPlainObject(peer) && typeof peer.executable === 'string' && peer.executable.includes('*')) {
+        peer.executable = await resolveExecutable(peer.executable);
+      }
+    }
   }
   return normalizePeerConfig(parsed);
 }

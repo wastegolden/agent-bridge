@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ENV_KEYS, PeerPolicyError, buildPeerPreamble, formatChain, parseChain, planPeerCall, readChainContext } from '../src/peer/chain.mjs';
 import { CLAUDE_WRITE_TOOLS, buildInvocation, childEnvironment, parseClaudeOutput, parseCodexOutput } from '../src/peer/cli.mjs';
-import { normalizePeerConfig } from '../src/peer/config.mjs';
+import { loadPeerConfig, normalizePeerConfig, resolveExecutablePattern } from '../src/peer/config.mjs';
 import { createPeerJobs, defaultKillTree } from '../src/peer/jobs.mjs';
 import { createPeerServer } from '../src/peer/server.mjs';
 
@@ -184,6 +184,29 @@ test('peer config refuses anything that could widen a read-only run', () => {
   refuse({ ...base, peers: { codex: { executable: exe('codex.cmd') } } });
   refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), reasoningEffort: 'insane' } } });
   refuse({ ...base, peers: {}, limits: { maxTimeoutMs: 2_147_483_648, timeoutMs: 2_147_483_648 } });
+});
+
+test('a versioned executable pattern resolves to the newest installed copy', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-peer-exe-'));
+  try {
+    for (const [version, when] of [['2.1.100', 1_700_000_000], ['2.1.284', 1_800_000_000], ['empty', 1_900_000_000]]) {
+      await mkdir(path.join(dir, version), { recursive: true });
+      if (version !== 'empty') {
+        const file = path.join(dir, version, 'claude.exe');
+        await writeFile(file, 'x');
+        await utimes(file, when, when);
+      }
+    }
+    const configPath = path.join(dir, 'peer.json');
+    await writeFile(configPath, JSON.stringify({ schemaVersion: 1, stateDir: dir, peers: { 'claude-code': { executable: `${dir.replaceAll('\\', '/')}/*/claude.exe` } } }));
+    const config = await loadPeerConfig({ env: { AGENT_PEER_CONFIG: configPath } });
+    assert.equal(config.peers['claude-code'].executable, path.join(dir, '2.1.284', 'claude.exe'));
+    assert.equal(await resolveExecutablePattern(path.join(dir, 'plain.exe')), path.join(dir, 'plain.exe'));
+    await assert.rejects(resolveExecutablePattern(`${dir}/*/missing.exe`), { code: 'PEER_CONFIG_INVALID' });
+    await assert.rejects(resolveExecutablePattern(`${dir}/*/*/claude.exe`), { code: 'PEER_CONFIG_INVALID' });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // --- jobs + server end to end with the fake CLI ------------------------------
