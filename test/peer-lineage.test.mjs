@@ -43,6 +43,16 @@ test('an env-stripped peer server recovers its chain from the ledger', async () 
   });
 });
 
+test('the ledger also restores a filtered root task, and refuses a different one', async () => {
+  await withState(async (stateDir) => {
+    await recordActive(stateDir, { pid: 200, jobId: 'peer-1', chain: ['claude-code', 'codex'], target: 'codex', startedAt: 1_000_000, rootTask: 'session-abc' });
+    const ancestor = await findLedgerAncestor({ stateDir, pid: 300, table: table() });
+    assert.equal(ancestor.rootTask, 'session-abc');
+    assert.equal(readChainContext(applyLineage({ AGENT_BRIDGE_SELF: 'codex' }, ancestor).env).rootTask, 'session-abc');
+    assert.throws(() => applyLineage({ AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_ROOT_TASK: 'other' }, ancestor), { code: 'PEER_CHAIN_INVALID' });
+  });
+});
+
 test('a disagreeing inherited chain or self is refused', async () => {
   await withState(async (stateDir) => {
     await recordActive(stateDir, { pid: 200, jobId: 'peer-1', chain: ['claude-code', 'codex'], target: 'codex', startedAt: 1_000_000 });

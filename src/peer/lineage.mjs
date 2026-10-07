@@ -32,12 +32,12 @@ export function activeDir(stateDir) {
   return path.join(stateDir, 'active');
 }
 
-export async function recordActive(stateDir, { pid, jobId, chain, target, startedAt }) {
+export async function recordActive(stateDir, { pid, jobId, chain, target, startedAt, rootTask = null }) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   const dir = activeDir(stateDir);
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, `${pid}.json`);
-  await writeFile(file, `${JSON.stringify({ pid, jobId, chain: formatChain(chain), target, startedAt })}\n`, 'utf8');
+  await writeFile(file, `${JSON.stringify({ pid, jobId, chain: formatChain(chain), target, startedAt, rootTask })}\n`, 'utf8');
   return file;
 }
 
@@ -101,7 +101,7 @@ export async function findLedgerAncestor({ stateDir, pid = process.pid, table, r
       if (timeMatches) {
         const chain = parseChain(entry.chain);
         if (chain.at(-1) !== entry.target) throw new PeerPolicyError('PEER_CHAIN_INVALID', 'ledger entry chain does not end with its target');
-        return { chain, target: entry.target, jobId: entry.jobId ?? null, ancestorPid: current, hops };
+        return { chain, target: entry.target, jobId: entry.jobId ?? null, rootTask: typeof entry.rootTask === 'string' ? entry.rootTask : null, ancestorPid: current, hops };
       }
     }
     current = table.get(current)?.ppid ?? null;
@@ -125,5 +125,13 @@ export function applyLineage(env, ancestor) {
   if (inherited !== '' && inherited !== recorded) {
     throw new PeerPolicyError('PEER_CHAIN_INVALID', `inherited chain "${inherited}" disagrees with the recorded chain "${recorded}"`, { field: 'AGENT_BRIDGE_CHAIN' });
   }
-  return { env: { ...env, AGENT_BRIDGE_CHAIN: recorded }, source: inherited === '' ? 'ledger' : 'environment+ledger' };
+  const next = { ...env, AGENT_BRIDGE_CHAIN: recorded };
+  const inheritedTask = typeof env.AGENT_BRIDGE_ROOT_TASK === 'string' ? env.AGENT_BRIDGE_ROOT_TASK.trim() : '';
+  if (ancestor.rootTask) {
+    if (inheritedTask !== '' && inheritedTask !== ancestor.rootTask) {
+      throw new PeerPolicyError('PEER_CHAIN_INVALID', 'inherited root task disagrees with the recorded root task', { field: 'AGENT_BRIDGE_ROOT_TASK' });
+    }
+    next.AGENT_BRIDGE_ROOT_TASK = ancestor.rootTask;
+  }
+  return { env: next, source: inherited === '' ? 'ledger' : 'environment+ledger' };
 }

@@ -22,6 +22,7 @@
 // Errors: unknown tools and schema-invalid arguments are JSON-RPC protocol errors
 // (-32602); policy refusals and runtime failures are tool results with isError.
 
+import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -33,6 +34,8 @@ export const PEER_SERVER_NAME = 'agent-peer';
 export const PEER_SERVER_VERSION = '1.1.0';
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
+/** Windows drive (C:\ or C:/), UNC or POSIX absolute path. */
+const ABSOLUTE_PATH_PATTERN = '^(?:[A-Za-z]:[\\\\/]|[\\\\/])';
 const str = (description, extra = {}) => ({ type: 'string', description, ...extra });
 const int = (description, extra = {}) => ({ type: 'integer', description, ...extra });
 const tool = (name, description, properties, required = []) => ({
@@ -52,14 +55,14 @@ export function peerTools(limits) {
         target: { type: 'string', enum: [...PEER_TARGETS], description: 'Harness to run.' },
         mode: { type: 'string', enum: [...PEER_MODES], description: 'consult | review (both read-only) | delegate (may write inside cwd/addDirs).' },
         prompt: str('Complete, self-contained request. The peer sees nothing of this conversation. For review, include the exact material or file paths and what to judge; do not reveal which model produced it.', { minLength: 1, maxLength: limits.maxPromptChars }),
-        cwd: str('Absolute existing working directory for the peer. When continuing a session it must equal that session\'s directory.'),
-        sessionId: str('Continue a session that an earlier peer job of the SAME target created (from that job\'s sessionId). Other sessions are refused.', { pattern: SESSION_ID_RE.source }),
+        cwd: str('Absolute existing working directory for the peer. When continuing a session it must equal that session\'s directory.', { pattern: ABSOLUTE_PATH_PATTERN }),
+        sessionId: str('Continue a session that an earlier peer job of the SAME target and the SAME root task created (from that job\'s sessionId). Other sessions are refused.', { pattern: SESSION_ID_RE.source }),
         model: str('Optional explicit model for the peer CLI. Omitted uses the configured or CLI default.', { pattern: MODEL_RE.source }),
-        addDirs: { type: 'array', items: { type: 'string' }, description: 'delegate only, new sessions only: extra absolute writable directories.' },
+        addDirs: { type: 'array', items: { type: 'string', pattern: ABSOLUTE_PATH_PATTERN }, description: 'delegate only, new sessions only: extra absolute writable directories.' },
         title: str('Short label for job listings.', { maxLength: 200 }),
         timeoutMs: int('Wall-clock limit for the peer process.', { minimum: 10_000, maximum: limits.maxTimeoutMs }),
         waitMs: int('How long this call waits for completion before returning the running job.', { minimum: 0, maximum: limits.maxWaitMs }),
-        rootTask: str('Optional task label carried down the chain for audit (root controller only).', { pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }),
+        rootTask: str('Root controller only: task label carried down the chain. Omitted, this server instance (one controller session) uses its own label. Peer sessions can only be continued under the same root task.', { pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }),
       },
       ['target', 'mode', 'prompt', 'cwd'],
     ),
@@ -100,7 +103,7 @@ function validateArgs(spec, args) {
     const value = args[key];
     const ok =
       schema.type === 'integer' ? Number.isSafeInteger(value) && (schema.minimum === undefined || value >= schema.minimum) && (schema.maximum === undefined || value <= schema.maximum)
-        : schema.type === 'array' ? Array.isArray(value) && value.every((item) => typeof item === 'string')
+        : schema.type === 'array' ? Array.isArray(value) && value.every((item) => typeof item === 'string' && (schema.items?.pattern === undefined || new RegExp(schema.items.pattern).test(item)))
           : schema.type === 'string' ? typeof value === 'string' && (schema.minLength === undefined || value.length >= schema.minLength) && (schema.maxLength === undefined || value.length <= schema.maxLength) && (schema.enum === undefined || schema.enum.includes(value)) && (schema.pattern === undefined || new RegExp(schema.pattern).test(value))
             : false;
     if (!ok) throw invalid(`invalid ${key}`, key);
@@ -125,6 +128,8 @@ export function createPeerServer({ env = process.env, config = null, configError
   const limits = config?.limits ?? { maxPromptChars: 200_000, maxTimeoutMs: 4 * 60 * 60_000, maxWaitMs: 55_000, timeoutMs: 30 * 60_000, maxConcurrentJobs: 3 };
   const tools = peerTools(limits);
   const jobManager = jobs ?? (config ? createPeerJobs({ stateDir: config.stateDir, maxConcurrent: limits.maxConcurrentJobs }) : null);
+  // One MCP server process serves one controller session: its default root task label.
+  const instanceTask = `session-${randomUUID()}`;
   let contextPromise = null;
 
   /** Resolve (once) where this server sits on the chain. */
@@ -138,8 +143,10 @@ export function createPeerServer({ env = process.env, config = null, configError
             ({ env: effectiveEnv, source } = await resolveLineage(env));
           } catch (error) {
             // Without a verified lineage, a process that claims to be a root controller
-            // cannot be distinguished from a callee whose chain was filtered away.
-            const claimsRoot = typeof env?.[ENV_KEYS.chain] !== 'string' || env[ENV_KEYS.chain].trim() === '';
+            // cannot be distinguished from a callee whose chain was filtered away. A
+            // one-element chain is a root claim too (a real root carries no chain).
+            const inherited = typeof env?.[ENV_KEYS.chain] === 'string' ? env[ENV_KEYS.chain].split('>').filter((part) => part.trim() !== '') : [];
+            const claimsRoot = inherited.length <= 1;
             if (claimsRoot || error?.code === 'PEER_CHAIN_INVALID') {
               return { context: null, error: error?.code ? error : new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', String(error?.message ?? error)), source: 'unverified' };
             }
@@ -193,7 +200,7 @@ export function createPeerServer({ env = process.env, config = null, configError
       isRootController: context?.isRoot ?? null,
       maxDepth: context?.maxDepth ?? null,
       maxDelegateDepth: context?.maxDelegateDepth ?? null,
-      rootTask: context?.rootTask ?? null,
+      rootTask: context ? (context.isRoot ? instanceTask : context.rootTask) : null,
       contextError: contextError ? { code: contextError.code, message: contextError.message } : null,
       configError: config ? null : { code: configError?.code ?? 'PEER_CONFIG_INVALID', message: configError?.message ?? 'peer config is not loaded' },
       peers,
@@ -206,8 +213,11 @@ export function createPeerServer({ env = process.env, config = null, configError
     if (args.rootTask !== undefined && !context.isRoot) {
       throw new PeerPolicyError('PEER_ARGS_INVALID', 'only the root controller may set rootTask; it is inherited below the root', { field: 'rootTask' });
     }
+    // Every call carries a root task: inherited below the root; at the root the explicit
+    // label or this server instance's own label (one controller session).
+    const rootTask = context.isRoot ? (args.rootTask ?? instanceTask) : context.rootTask;
     // Policy first: a refused call must not depend on whether the peer is installed.
-    const plan = planPeerCall(context, { target: args.target, mode: args.mode, rootTask: args.rootTask ?? null });
+    const plan = planPeerCall(context, { target: args.target, mode: args.mode, rootTask });
     const peer = config.peers[args.target];
     if (!peer || peer.enabled !== true) throw new PeerPolicyError('PEER_NOT_CONFIGURED', `peer "${args.target}" is not configured or disabled on this host`, { field: 'target' });
     if (!path.isAbsolute(args.cwd)) throw new PeerPolicyError('PEER_ARGS_INVALID', 'cwd must be an absolute path', { field: 'cwd' });
@@ -216,8 +226,10 @@ export function createPeerServer({ env = process.env, config = null, configError
       if (!prior) {
         throw new PeerPolicyError('PEER_SESSION_UNKNOWN', 'only sessions created by an earlier peer job of the same target can be continued', { field: 'sessionId' });
       }
-      if (prior.root !== undefined && prior.root !== null && prior.root !== context.root) {
-        throw new PeerPolicyError('PEER_SESSION_FOREIGN', 'that session belongs to a task with a different root controller', { field: 'sessionId' });
+      // Another controller session (or another task) sharing this ledger cannot take
+      // over the session: root controller and root task must both match.
+      if (prior.root !== context.root || prior.rootTask === null || prior.rootTask === undefined || prior.rootTask !== plan.rootTask) {
+        throw new PeerPolicyError('PEER_SESSION_FOREIGN', 'that session belongs to another root controller session or task; pass the same rootTask it was created under', { field: 'sessionId' });
       }
       if (typeof prior.cwd === 'string' && !samePath(prior.cwd, args.cwd)) {
         throw new PeerPolicyError('PEER_ARGS_INVALID', `a continued session keeps its working directory ${prior.cwd}`, { field: 'cwd' });

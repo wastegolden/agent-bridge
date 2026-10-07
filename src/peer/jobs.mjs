@@ -23,7 +23,7 @@ import path from 'node:path';
 
 import { PeerPolicyError } from './chain.mjs';
 import { parsePeerOutput } from './cli.mjs';
-import { clearActive, recordActive } from './lineage.mjs';
+import { clearActive, readProcessTable, recordActive } from './lineage.mjs';
 
 export const ACTIVE_JOB_STATES = Object.freeze(['running', 'cancelling', 'timing_out']);
 export const TERMINAL_JOB_STATES = Object.freeze(['completed', 'failed', 'cancelled', 'timed_out', 'lost']);
@@ -64,6 +64,14 @@ export function defaultKillTree(pid, { spawnImpl = nodeSpawn, platform = process
     });
   }
   return new Promise((resolve) => {
+    const groupAlive = () => {
+      try {
+        process.kill(-pid, 0);
+        return true;
+      } catch (error) {
+        return error?.code === 'EPERM';
+      }
+    };
     const signal = (sig) => {
       try {
         process.kill(-pid, sig);
@@ -77,12 +85,40 @@ export function defaultKillTree(pid, { spawnImpl = nodeSpawn, platform = process
         }
       }
     };
-    signal('SIGTERM');
+    if (!signal('SIGTERM') && !isProcessAlive(pid) && !groupAlive()) {
+      resolve({ ok: true, code: 'ALREADY_GONE' });
+      return;
+    }
     setTimeout(() => {
-      if (isProcessAlive(pid)) signal('SIGKILL');
-      resolve({ ok: true, code: 'SIGNALLED' });
+      // Escalate on the whole group: a grandchild may have ignored SIGTERM.
+      if (groupAlive() || isProcessAlive(pid)) signal('SIGKILL');
+      setTimeout(() => {
+        const gone = !groupAlive() && !isProcessAlive(pid);
+        resolve(gone ? { ok: true, code: 'SIGNALLED' } : { ok: false, code: 'STILL_ALIVE' });
+      }, 500).unref?.();
     }, 3000).unref?.();
   });
+}
+
+/** Owner start time and the OS process creation time may differ by this much (ms). */
+const OWNER_MATCH_WINDOW_MS = 120_000;
+
+/**
+ * Process creation time (ms) by pid from a cached OS process-table snapshot, or null
+ * when unknown. The snapshot is only taken when a stale record names a live pid.
+ */
+function defaultProcessStartTime() {
+  let cache = null;
+  return async (pid) => {
+    if (!cache || Date.now() - cache.at > 30_000) {
+      try {
+        cache = { at: Date.now(), table: readProcessTable() };
+      } catch {
+        cache = { at: Date.now(), table: new Map() };
+      }
+    }
+    return cache.table.get(pid)?.createdAt ?? null;
+  };
 }
 
 async function writeJsonAtomic(file, value) {
@@ -99,6 +135,8 @@ export function createPeerJobs({
   now = () => Date.now(),
   maxConcurrent = 3,
   ownerPid = process.pid,
+  ownerStartedAt = Math.round(Date.now() - process.uptime() * 1000),
+  processStartTime = defaultProcessStartTime(),
   shutdownGraceMs = 10_000,
   lineage = true,
   logger = () => {},
@@ -140,8 +178,14 @@ export function createPeerJobs({
    */
   async function reconcile(record) {
     if (!ACTIVE_JOB_STATES.includes(record.status) || live.has(record.jobId)) return record;
-    const ownedHere = record.ownerPid === ownerPid;
-    if (!ownedHere && isAlive(record.ownerPid)) return record;
+    const ownedHere = record.ownerPid === ownerPid && record.ownerStartedAt === ownerStartedAt;
+    if (!ownedHere && isAlive(record.ownerPid)) {
+      // A live pid only proves the owner is alive if it is the same process: pids are
+      // reused. Unknown start times keep the job (fail safe: never invent a loss).
+      const started = await processStartTime(record.ownerPid);
+      const sameProcess = started === null || !Number.isFinite(record.ownerStartedAt) || Math.abs(started - record.ownerStartedAt) <= OWNER_MATCH_WINDOW_MS;
+      if (sameProcess) return record;
+    }
     record.status = 'lost';
     record.endedAt = now();
     record.errors = [...(record.errors ?? []), 'the peer server that owned this job stopped before its outcome was recorded; the outcome is unknown and it was not re-run'];
@@ -244,7 +288,10 @@ export function createPeerJobs({
       logger({ phase: 'result', jobId: record.jobId, code: error?.code ?? 'E_PERSIST' });
     }
     await persist(entry);
-    if (lineage) await clearActive(stateDir, record.pid).catch(() => undefined);
+    if (lineage) {
+      await entry.ledgerWrite;
+      await clearActive(stateDir, record.pid).catch(() => undefined);
+    }
     await Promise.all([entry.stdoutFile, entry.stderrFile].map((stream) => new Promise((resolve) => {
       if (!stream || stream.destroyed || stream.writableFinished) resolve();
       else stream.end(resolve);
@@ -303,6 +350,7 @@ export function createPeerJobs({
         sessionId: sessionIdRequested,
         status: 'running',
         ownerPid,
+        ownerStartedAt,
         pid: null,
         startedAt,
         deadlineAt: startedAt + timeoutMs,
@@ -325,6 +373,7 @@ export function createPeerJobs({
         settled: false,
         timer: null,
         persistChain: Promise.resolve(),
+        ledgerWrite: Promise.resolve(),
         settledPromise,
         resolveSettled,
       };
@@ -353,10 +402,8 @@ export function createPeerJobs({
     }
     entry.child = child;
     record.pid = child.pid ?? null;
-    if (lineage && record.pid) {
-      await recordActive(stateDir, { pid: record.pid, jobId, chain: plan.chain, target: plan.target, startedAt: record.startedAt })
-        .catch((error) => record.errors.push(`lineage ledger write failed (${error?.code ?? 'E_IO'})`));
-    }
+    // Every listener is attached synchronously after spawn, before any await, so an
+    // early exit or error can never be emitted with nobody listening.
     child.stdout?.on('data', (chunk) => {
       entry.stdoutBytes += chunk.length;
       if (!entry.stdoutFile.destroyed) entry.stdoutFile.write(chunk);
@@ -379,6 +426,12 @@ export function createPeerJobs({
     });
     child.stdin?.on('error', () => undefined);
     child.stdin?.end(prompt, 'utf8');
+    if (lineage && record.pid) {
+      // settle() waits for this write before clearing the entry, so a fast exit can
+      // never leave a stale ledger entry behind.
+      entry.ledgerWrite = recordActive(stateDir, { pid: record.pid, jobId, chain: plan.chain, target: plan.target, startedAt: record.startedAt, rootTask: plan.rootTask ?? null })
+        .catch((error) => record.errors.push(`lineage ledger write failed (${error?.code ?? 'E_IO'})`));
+    }
     entry.timer = setTimeout(() => {
       if (entry.settled || record.status !== 'running') return;
       record.status = 'timing_out';
@@ -387,6 +440,7 @@ export function createPeerJobs({
       void requestKill(entry, 'timeout');
     }, Math.min(timeoutMs, MAX_TIMER_MS));
     entry.timer.unref?.();
+    await entry.ledgerWrite;
     await persist(entry);
     logger({ phase: 'start', jobId, target: plan.target, mode: plan.mode });
     return snapshot(record);

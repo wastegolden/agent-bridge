@@ -293,13 +293,27 @@ test('root claude-code consults codex; the child inherits the chain, not the cal
     const rest = await rpc(server, 'peer_result', { jobId: asked.job.jobId, offset: first.nextOffset, limit: 200_000 });
     assert.equal(first.finalMessage + rest.finalMessage, result.finalMessage);
     assert.equal(rest.nextOffset, null);
-    // Continue the same session; a foreign or relocated session is refused.
-    const again = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'And 3+3?', cwd: work, sessionId: asked.job.sessionId, waitMs: 20_000 });
+    // Continue the same session under the same root task; foreign or relocated sessions are refused.
+    const again = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'And 3+3?', cwd: work, sessionId: asked.job.sessionId, rootTask: 'demo-1', waitMs: 20_000 });
     assert.equal(again.job.status, 'completed');
     assert.equal(again.job.sessionId, asked.job.sessionId);
+    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, sessionId: asked.job.sessionId })).error.code, 'PEER_SESSION_FOREIGN', 'another root task');
     assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, sessionId: 'users-own-interactive-thread' })).error.code, 'PEER_SESSION_UNKNOWN');
-    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: os.tmpdir(), sessionId: asked.job.sessionId })).error.code, 'PEER_ARGS_INVALID');
+    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: os.tmpdir(), sessionId: asked.job.sessionId, rootTask: 'demo-1' })).error.code, 'PEER_ARGS_INVALID');
     assert.equal((await rpc(server, 'peer_list', {})).jobs.length, 2);
+  });
+});
+
+test('another controller session sharing the ledger cannot take over a peer session', async () => {
+  await withServer({ AGENT_BRIDGE_SELF: 'claude-code' }, async ({ server, work, config, jobs }) => {
+    const mine = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'hello', cwd: work, waitMs: 20_000 });
+    assert.equal(mine.job.status, 'completed');
+    assert.match(mine.job.rootTask, /^session-/, 'a root without an explicit label gets its own session label');
+    const own = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'again', cwd: work, sessionId: mine.job.sessionId, waitMs: 20_000 });
+    assert.equal(own.job.status, 'completed', 'the same controller session continues its own peer session');
+    const other = createPeerServer({ env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, AGENT_BRIDGE_SELF: 'claude-code' }, config, jobs });
+    const stolen = await rpc(other, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, sessionId: mine.job.sessionId });
+    assert.equal(stolen.error.code, 'PEER_SESSION_FOREIGN');
   });
 });
 
@@ -332,6 +346,42 @@ test('an env-stripped callee is placed back on its chain by the lineage resolver
   await withServer({ AGENT_BRIDGE_SELF: 'codex' }, async ({ server, work }) => {
     assert.equal((await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'review', prompt: 'x', cwd: work })).error.code, 'PEER_LINEAGE_UNAVAILABLE');
   }, { resolveLineage: broken });
+  // A self-only chain is still a root claim and must not slip past an unverifiable lineage.
+  await withServer({ AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_CHAIN: 'codex' }, async ({ server, work }) => {
+    assert.equal((await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'review', prompt: 'x', cwd: work })).error.code, 'PEER_LINEAGE_UNAVAILABLE');
+  }, { resolveLineage: broken });
+  // A genuine callee chain survives an unavailable lineage (it is already restrictive).
+  await withServer({ AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_CHAIN: 'claude-code>codex' }, async ({ server, work }) => {
+    assert.equal((await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'review', prompt: 'x', cwd: work })).error.code, 'PEER_CYCLE');
+  }, { resolveLineage: broken });
+});
+
+test('a peer CLI that exits immediately is settled from its real exit', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-peer-fast-'));
+  try {
+    // Exits before the start() bookkeeping (ledger + persist) has finished.
+    const instant = (command, args, options) => spawn(process.execPath, ['-e', 'process.exit(3)'], options);
+    const jobs = createPeerJobs({ stateDir: dir, spawnImpl: instant });
+    const allocation = jobs.allocate();
+    const plan = planPeerCall(rootClaude(), { target: 'codex', mode: 'consult', rootTask: 't-1' });
+    const started = await jobs.start({
+      jobId: allocation.jobId,
+      invocation: buildInvocation({ target: 'codex', mode: 'consult', cwd: dir, lastMessageFile: allocation.lastMessageFile }, peerConfig().peers.codex),
+      plan,
+      prompt: 'hi',
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot },
+      timeoutMs: 60_000,
+      cwd: dir,
+    });
+    const settled = await jobs.wait(started.jobId, 10_000);
+    assert.equal(settled.status, 'failed');
+    assert.equal(settled.exitCode, 3);
+    let active = [];
+    try { active = await readdir(path.join(dir, 'active')); } catch { active = []; }
+    assert.deepEqual(active, [], 'no stale lineage entry survives a fast exit');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('model failures, cancellation and timeouts become terminal only after the process exits', async () => {
@@ -400,7 +450,8 @@ test('the concurrency limit holds for simultaneous requests', async () => {
     assert.equal(started.length, 1);
     await rpc(server, 'peer_cancel', { jobId: started[0].job.jobId });
     assert.equal((await rpc(server, 'peer_check', { jobId: started[0].job.jobId, waitMs: 20_000 })).job.status, 'cancelled');
-    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'hi', cwd: 'relative' })).error.code, 'PEER_ARGS_INVALID');
+    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'hi', cwd: 'relative' })).protocolError.code, -32602, 'the advertised absolute-path pattern is enforced');
+    assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'delegate', prompt: 'hi', cwd: work, addDirs: ['relative'] })).protocolError.code, -32602);
     assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'hi', cwd: path.join(work, 'missing') })).error.code, 'PEER_ARGS_INVALID');
     assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'hi', cwd: work, extra: 1 })).protocolError.code, -32602);
     assert.equal((await rpc(server, 'peer_ask', { target: 'gemini', mode: 'consult', prompt: 'hi', cwd: work })).protocolError.code, -32602);
@@ -434,16 +485,19 @@ test('shutdown stops active children and records the real outcome', async () => 
 test('recovery marks only jobs of dead owners lost; a lost job has no answer', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-peer-lost-'));
   try {
-    const write = async (jobId, ownerPid) => {
+    const write = async (jobId, ownerPid, ownerStartedAt = undefined) => {
       await mkdir(path.join(dir, 'jobs', jobId), { recursive: true });
-      await writeFile(path.join(dir, 'jobs', jobId, 'job.json'), JSON.stringify({ jobId, status: 'running', ownerPid, errors: [], target: 'codex', mode: 'consult' }));
+      await writeFile(path.join(dir, 'jobs', jobId, 'job.json'), JSON.stringify({ jobId, status: 'running', ownerPid, ownerStartedAt, errors: [], target: 'codex', mode: 'consult' }));
     };
     await write('peer-1791297108493-0a1b2c3d', DEAD_PID);
-    await write('peer-1791297108494-0a1b2c3e', process.ppid);
-    const jobs = createPeerJobs({ stateDir: dir, spawnImpl: () => assert.fail('must not spawn') });
+    await write('peer-1791297108494-0a1b2c3e', process.ppid, 5_000_000);
+    await write('peer-1791297108495-0a1b2c3f', process.ppid, 1_000_000);
+    const startTimes = { [process.ppid]: 5_010_000 };
+    const jobs = createPeerJobs({ stateDir: dir, spawnImpl: () => assert.fail('must not spawn'), processStartTime: async (pid) => startTimes[pid] ?? null });
     const listed = Object.fromEntries((await jobs.list()).map((job) => [job.jobId, job.status]));
     assert.equal(listed['peer-1791297108493-0a1b2c3d'], 'lost');
     assert.equal(listed['peer-1791297108494-0a1b2c3e'], 'running', 'a job of another live server is left alone');
+    assert.equal(listed['peer-1791297108495-0a1b2c3f'], 'lost', 'a reused owner pid is not the owner');
     const result = await jobs.result('peer-1791297108493-0a1b2c3d');
     assert.equal(result.complete, true);
     assert.equal(result.outcomeUnknown, true);
