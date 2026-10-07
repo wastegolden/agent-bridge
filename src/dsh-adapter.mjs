@@ -4861,7 +4861,11 @@ export class DshAdapter {
       throw adapterError('adapter/session-create-failed', 'session create returned no sessionId', {})
     }
     record.sessionId = sessionId
-    if(typeof controller.rename==='function')await controller.rename({sessionId,title:`[codex-bridge] ${packet.title}`})
+    // The title names the harness that actually submitted this task: the persisted
+    // controller hint is used only when it is exactly one of the two known harnesses,
+    // otherwise the neutral `controller` label keeps the title honest.
+    const controllerLabel = packet.metadata?.controller === 'codex' || packet.metadata?.controller === 'claude-code' ? packet.metadata.controller : 'controller'
+    if(typeof controller.rename==='function')await controller.rename({sessionId,title:`[agent-bridge·${controllerLabel}] ${packet.title}`})
     record.agentPreset = created.agentPreset ?? null
     record.agentPresetMatched = this.#options.agentPreset === undefined ? null : created.agentPreset === this.#options.agentPreset
 

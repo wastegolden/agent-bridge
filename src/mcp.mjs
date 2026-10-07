@@ -32,6 +32,7 @@ export const TOOLS=[
  ['bridge_submit','Submit one bounded task. Defaults to Flash; returns durable task identity quickly. The complete packet shape is advertised in inputSchema.properties.packet.',object({packet:TASK_PACKET_SCHEMA}),['packet']],
  ['bridge_check','Read task state and cursor-based events; bounded wait does not cancel work.',object({...taskArgs,after:num,waitMs:num,limit:num}),['taskId']],
  ['bridge_result','Read complete result in repeatable slices with evidence and uncertainty.',object({...taskArgs,offset:num,limit:num}),['taskId']],
+ ['bridge_dossier','Read-only closeout dossier for one owned task: the submitted request, effective route, workspace and review/integration evidence, acknowledgement and archive state. Large check output is truncated; read the full result with bridge_result.',object({...taskArgs}),['taskId']],
  ['bridge_approve','Controller authorizes execution after checking understanding against existing user authorization.',object({...taskArgs,revision:num,understandingHash:str}),['taskId','revision','understandingHash']],
  ['bridge_clarify','Clarify the understanding of one owned task in its existing session; only a task currently awaiting_approval is eligible, and any other state is rejected as a clarification conflict. Bounded versioned text is appended to the next understanding attempt as clearly delimited untrusted context; the original packet, scope, acceptance, model, workspace and revision stay unchanged. A clarification is never execution approval, the new understanding hash must still be approved, and an identical replay returns the same task without another attempt.',clarifyArgs,['taskId','revision','understandingHash','clarificationId','text']],
  ['bridge_cancel','Cancel owned queued work, active turn and jobs; inspect stop confirmation.',object({...taskArgs,reason:str}),['taskId']],
@@ -72,6 +73,7 @@ export function createDispatcher(service){
    case 'bridge_submit':return service.submit(a.packet);
    case 'bridge_check':return service.wait(a.taskId,a);
    case 'bridge_result':return service.result(a.taskId,a);
+   case 'bridge_dossier':return service.dossier(a.taskId);
    case 'bridge_approve':return service.approve(a.taskId,a);
    case 'bridge_clarify':{
     ownedRevision(a);boundedText(a,'understandingHash');boundedText(a,'clarificationId',200);boundedText(a,'text',20000);

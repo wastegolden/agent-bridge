@@ -91,6 +91,9 @@ function createFakeHost(options = {}) {
   const listeners = new Map()
   const calls = {
     create: [],
+    // Session titles are set through the controller's own `rename` seam; the real
+    // host exposes it, so the double records every title it is asked to apply.
+    rename: [],
     selectModel: [],
     prompt: [],
     // Child prompts are DELIVERED through the child agent's own `followup` seam,
@@ -264,6 +267,9 @@ function createFakeHost(options = {}) {
       if (options.createAgentPreset !== undefined) value.agentPreset = options.createAgentPreset
       else if (request.agentPreset !== undefined) value.agentPreset = request.agentPreset
       return value
+    },
+    async rename(request) {
+      calls.rename.push(jsonSafe(request))
     },
     async selectModel(request) {
       calls.selectModel.push(jsonSafe(request))
@@ -878,6 +884,31 @@ test('start binds the envelope id, attemptId and prompt and returns the contract
   assert.equal(host.calls.prompt[0].content[0].text, 'ROOT PROMPT VERBATIM')
   assert.equal(res.effectivePolicy.enforcement.mechanisms.includes('guard'), true)
   assert.equal(typeof JSON.stringify(res.effectivePolicy), 'string')
+})
+
+test('DSH session titles label the submitting controller', async () => {
+  const titled = async (metadata) => {
+    const host = createFakeHost()
+    const adapter = new DshAdapter(host.ctx)
+    const packet = metadata === undefined
+      ? makePacket({ title: 'label case' })
+      : makePacket({ title: 'label case', metadata })
+    await adapter.start(makeEnvelope({ packet }))
+    return host.calls.rename
+  }
+  assert.deepEqual(await titled({ controller: 'codex' }), [
+    { sessionId: 'session-1', title: '[agent-bridge·codex] label case' }
+  ])
+  assert.deepEqual(await titled({ controller: 'claude-code' }), [
+    { sessionId: 'session-1', title: '[agent-bridge·claude-code] label case' }
+  ])
+  // Any other hint is not one of the two known harnesses: the neutral label is used.
+  assert.deepEqual(await titled({ controller: 'human' }), [
+    { sessionId: 'session-1', title: '[agent-bridge·controller] label case' }
+  ])
+  assert.deepEqual(await titled(undefined), [
+    { sessionId: 'session-1', title: '[agent-bridge·controller] label case' }
+  ])
 })
 
 test('the start receipt never replaces immutable store identity', async () => {

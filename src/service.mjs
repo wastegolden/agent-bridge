@@ -30,6 +30,31 @@ function understandingDigest(task,text){
   return generation>0?digest({revision:task.revision,understandingGeneration:generation,attemptId:task.attemptId,text}):digest(text);
 }
 
+// The closeout dossier is a READ-ONLY projection. It returns detached copies only, so a
+// caller can never mutate the persisted record through it, and every `stdout`/`stderr`
+// string anywhere inside the stored evidence is bounded to its LAST 4000 characters.
+// The record itself keeps the full output; `result(id)` still serves the whole result.
+const DOSSIER_EVIDENCE_CHARS=4000;
+const DOSSIER_TRUNCATED='…[truncated]\n';
+function dossierCut(value){return typeof value==='string'&&value.length>DOSSIER_EVIDENCE_CHARS?DOSSIER_TRUNCATED+value.slice(-DOSSIER_EVIDENCE_CHARS):value;}
+function dossierBound(value){
+  if(Array.isArray(value))return value.map(dossierBound);
+  if(value&&typeof value==='object'){
+    const copy={};
+    for(const [key,entry] of Object.entries(value)){
+      const bounded=dossierBound(entry);
+      copy[key]=(key==='stdout'||key==='stderr')&&typeof bounded==='string'?dossierCut(bounded):bounded;
+    }
+    return copy;
+  }
+  return value;
+}
+// Stored evidence is an object or absent; a non-object value is reported honestly as null.
+function dossierEvidence(value){
+  if(value===null||value===undefined||typeof value!=='object')return null;
+  return dossierBound(value);
+}
+
 export class BridgeService {
   constructor({store,adapter,workspaces,profiles=[],skills=[],defaults,maxConcurrent=4,routeLimits={},retention={successDays:7,failureDays:30},supervisor,projects}={}) {
     this.store=store;this.adapter=adapter;this.workspaces=workspaces;this.profiles=profiles;this.skills=skills;this.defaults=defaults;
@@ -546,6 +571,72 @@ export class BridgeService {
   result(id,{offset=0,limit=20000}={}){
     if(!Number.isSafeInteger(offset)||offset<0||!Number.isInteger(limit)||limit<1||limit>100000)fail('INVALID_CURSOR','Invalid result slice');
     const t=this.store.get(id);const text=t.result.text;return {taskId:id,revision:t.revision,attemptId:t.attemptId,status:t.status,text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,evidence:t.result.evidence,checks:t.result.checks,uncertainties:t.result.uncertainties};
+  }
+  /**
+   * Read-only closeout dossier for one owned task. It reads the persisted record and
+   * returns a NEW plain object: the submitted request (material text replaced by its
+   * length, never copied), the effective route, workspace and review/integration
+   * evidence, the acknowledgement and archive state, and the honest stop/result
+   * summary. Every `stdout`/`stderr` string inside the stored evidence is detached and
+   * bounded to its LAST 4000 characters, so the dossier cannot mutate or bloat around
+   * the full result that `result(id)` continues to serve. No state is changed here.
+   */
+  dossier(id){
+    const task=this.store.get(id);
+    const packet=task.packet&&typeof task.packet==='object'?task.packet:{};
+    const controller=packet.metadata?.controller;
+    const rootTask=packet.metadata?.rootTask;
+    const storedResult=task.result&&typeof task.result==='object'?task.result:null;
+    const resultText=typeof storedResult?.text==='string'?storedResult.text:null;
+    return {
+      schemaVersion:1,
+      taskId:task.id,
+      projectId:typeof packet.projectId==='string'?packet.projectId:null,
+      title:typeof packet.title==='string'?packet.title:null,
+      role:typeof packet.role==='string'?packet.role:null,
+      contractVersion:typeof packet.contractVersion==='string'?packet.contractVersion:null,
+      status:task.status??null,
+      phase:task.phase??null,
+      revision:Number.isSafeInteger(task.revision)?task.revision:null,
+      attempt:Number.isSafeInteger(task.attempt)?task.attempt:null,
+      createdAt:Number.isFinite(task.createdAt)?task.createdAt:null,
+      updatedAt:Number.isFinite(task.updatedAt)?task.updatedAt:null,
+      controller:typeof controller==='string'?controller:null,
+      rootTask:typeof rootTask==='string'?rootTask:null,
+      request:{
+        objective:packet.objective??null,
+        acceptance:packet.acceptance??null,
+        cwd:packet.cwd??null,
+        scope:packet.scope??null,
+        budget:packet.budget??null,
+        model:packet.model??null,
+        workspace:packet.workspace??null,
+        metadata:packet.metadata??null,
+        // Material text is NEVER copied: only its character count is reported.
+        materials:(Array.isArray(packet.materials)?packet.materials:[]).map(material=>({
+          path:typeof material?.path==='string'?material.path:null,
+          version:typeof material?.version==='string'?material.version:null,
+          sha256:typeof material?.sha256==='string'?material.sha256:null,
+          textChars:typeof material?.text==='string'?material.text.length:null
+        }))
+      },
+      effectiveModel:task.effectiveModel?dossierBound(task.effectiveModel):null,
+      stats:task.stats?dossierBound(task.stats):null,
+      sessionId:typeof task.sessionId==='string'?task.sessionId:null,
+      workspace:task.workspace?dossierBound(task.workspace):null,
+      review:dossierEvidence(task.review),
+      refresh:dossierEvidence(task.refresh),
+      integration:dossierEvidence(task.integration),
+      acknowledgement:{
+        resultCollected:task.resultCollected===true,
+        accepted:task.accepted===true,
+        artifactState:typeof task.artifactState==='string'?task.artifactState:null,
+        pinned:task.pinned===true
+      },
+      archive:dossierEvidence(task.archive),
+      stop:{stopConfirmed:task.stopConfirmed===true,activeJobs:Number.isInteger(task.activeJobs)?task.activeJobs:null},
+      result:{available:task.resultAvailable===true||resultText!==null,totalChars:resultText===null?null:resultText.length}
+    };
   }
   acknowledge(id,{revision,accepted=false,artifactState,pinned}={}){
     const t=this.store.get(id);if(revision!==t.revision||!TERMINAL.has(t.status))fail('ACK_CONFLICT','Only matching terminal task can be acknowledged');
