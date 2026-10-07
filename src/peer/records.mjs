@@ -174,10 +174,15 @@ export async function ensureGitExclude(projectRoot, {
   const present = existing.split('\n').some((line) => line.trim() === wanted);
   if (present) return { excluded: true, reason: 'present', file };
 
+  // Append ONLY the new line. The seam is an append, so re-sending the bytes that are
+  // already in the file would duplicate them. When the file does not end with a newline,
+  // its own line ending (CRLF or LF) is written before the pattern's own line so the
+  // existing content and its line endings stay untouched.
+  let separator = '';
   if (existing !== '' && !existing.endsWith('\n')) {
-    existing += existing.includes('\r\n') ? '\r\n' : '\n';
+    separator = existing.includes('\r\n') ? '\r\n' : '\n';
   }
-  await appendFileImpl(file, `${existing}${wanted}\n`, 'utf8');
+  await appendFileImpl(file, `${separator}${wanted}\n`, 'utf8');
   return { excluded: true, reason: 'added', file };
 }
 
@@ -268,8 +273,11 @@ function sessionsOf({ bridgeTasks, peerJobs }) {
   const sessions = [];
   for (const task of bridgeTasks) {
     if (!isObject(task)) continue;
-    if (typeof task.sessionId === 'string' && task.sessionId !== '') {
-      sessions.push(sessionEntry(task.harness ?? 'dsh', task.sessionId, task.taskId));
+    // A bridge task is a DSH task: its taskId and sessionId live inside `dossier`
+    // (the packet's dossier is the input shape), not on the outer task wrapper.
+    const dossier = isObject(task.dossier) ? task.dossier : {};
+    if (typeof dossier.sessionId === 'string' && dossier.sessionId !== '') {
+      sessions.push(sessionEntry(dossier.harness ?? 'dsh', dossier.sessionId, dossier.taskId));
     }
   }
   for (const entry of peerJobs) {
@@ -295,7 +303,7 @@ function renderRecordHeading(input) {
     outcome: input.outcome ?? null,
     keep: input.keep === true,
     eligibleAt: typeof input.eligibleAt === 'number' && Number.isFinite(input.eligibleAt) ? new Date(input.eligibleAt).toISOString() : null,
-    bridgeTaskIds: input.bridgeTasks.filter(isObject).map((task) => task.taskId ?? null),
+    bridgeTaskIds: input.bridgeTasks.filter(isObject).map((task) => (isObject(task.dossier) ? task.dossier.taskId ?? null : null)),
     peerJobIds: input.peerJobs.filter(isObject).map((entry) => (isObject(entry.job) ? entry.job.jobId ?? null : null)),
     sessions,
   };
@@ -587,8 +595,10 @@ function recordStateFromEvent(event) {
 }
 
 /**
- * An ordered fold of the index. Carries `skipped` (unparsable lines and session events
- * naming an unknown record), which is not a record id.
+ * An ordered fold of the index. Carries `skipped`, the number of lines that count as
+ * skipped: lines that are not usable index events (invalid JSON, a JSON value that is
+ * not an object, or an unrecognized `kind`) plus session events naming a recordId the
+ * index does not know. It is not a record id.
  */
 class RecordIndex extends Map {
   constructor() {
@@ -623,8 +633,18 @@ export async function appendIndexEvent(stateDir, event, {
 /**
  * Fold the index in file order. A `record` event creates the entry and marks every one
  * of its sessions `pending`; a `session` event updates that one session's state, note
- * and time. Unparsable lines and session events naming an unknown record are skipped
- * and counted in `map.skipped`. A missing index file is an empty index, not an error.
+ * and time.
+ *
+ * `map.skipped` counts exactly two categories, as the specification enumerates them:
+ *   * lines that are not usable index events — invalid JSON, a JSON value that is not an
+ *     object, or an event whose `kind` is neither `record` nor `session`; and
+ *   * session events naming a recordId the index does not know.
+ * A blank line (including the trailing newline of a well-formed file) is not an event
+ * line and is not counted. A recognized event that simply cannot be applied — a `record`
+ * event with no `recordId`, or a session event whose record does not list that session —
+ * is skipped without incrementing `skipped`.
+ *
+ * A missing index file is an empty index, not an error.
  *
  * @returns {Promise<Map<string, object>>}
  */
@@ -656,10 +676,10 @@ export async function readIndex(stateDir, { readFile: readFileImpl = readFile } 
     }
     if (event.kind === 'record') {
       const id = String(event.recordId ?? '');
-      if (id === '') {
-        index.skipped += 1;
-        continue;
-      }
+      // A record event with no recordId cannot create a state. The specification counts
+      // only unknown recordIds in SESSION events and unparsable lines, so this line is
+      // skipped without incrementing `skipped`.
+      if (id === '') continue;
       index.set(id, recordStateFromEvent(event));
       continue;
     }
@@ -669,10 +689,9 @@ export async function readIndex(stateDir, { readFile: readFileImpl = readFile } 
       continue;
     }
     const key = `${text(event.harness)}\u0000${text(event.id)}`;
-    if (!record.sessions.has(key)) {
-      index.skipped += 1;
-      continue;
-    }
+    // A known record whose session list does not name this session (and a session event
+    // whose recordId is known) is not one of the counted categories: skip it silently.
+    if (!record.sessions.has(key)) continue;
     const session = record.sessions.get(key);
     session.state = SESSION_STATES.includes(event.state) ? event.state : session.state;
     session.note = event.note ?? null;

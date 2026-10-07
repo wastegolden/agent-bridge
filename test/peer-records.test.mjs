@@ -168,10 +168,12 @@ test('ensureGitExclude preserves existing CRLF content and does not rewrite it',
   const dotGit = path.join(root, '.git');
   const infoDir = path.join(dotGit, 'info');
   const excludeFile = path.join(infoDir, 'exclude');
+  // The file already exists with CRLF content. It is seeded through `files`, not through
+  // `appends`: a seeded append would also be counted in `appendMap`, which the assertions
+  // below use to observe the appends made by the call under test.
   const fs = fakeFs({
     dirs: [root, dotGit, infoDir],
-    files: { [excludeFile]: '# keep me\r\n*.tmp\r\n' },
-    appends: { [excludeFile]: '*.bak\r\n' },
+    files: { [excludeFile]: '# keep me\r\n*.tmp\r\n*.bak\r\n' },
   });
   const result = await ensureGitExclude(root, {
     stat: fs.stat,
@@ -193,7 +195,10 @@ test('ensureGitExclude follows a worktree .git file to commondir/info/exclude', 
     dirs: [worktree, gitDir, commonDir],
     files: {
       [path.join(worktree, '.git')]: `gitdir: ${path.join('.git-dir')}\n`,
-      [path.join(gitDir, 'commondir')]: '../repo/.git\n',
+      // `commondir` holds a path relative to the gitdir that contains the file. The
+      // gitdir (worktrees/wt-1/.git-dir) is three levels below ROOT, so reaching
+      // ROOT/repo/.git from it takes three '..' segments.
+      [path.join(gitDir, 'commondir')]: '../../../repo/.git\n',
     },
   });
   const result = await ensureGitExclude(worktree, {
@@ -447,7 +452,9 @@ test('renderRecord front block parses back with sessions and ids', () => {
   const trickyMarkdown = renderRecord(tricky);
   const EIGHT = '`'.repeat(8);
   assert.ok(trickyMarkdown.includes(`${EIGHT}\na ${SEVEN_TICKS} b\n${EIGHT}`));
-  assert.equal(trickyMarkdown.includes(`${SEVEN_TICKS}\na `), false);
+  // An 8-backtick fence always contains a 7-backtick run, so check whole lines instead:
+  // no fence line may consist of exactly seven backticks.
+  assert.equal(/^`{7}$/m.test(trickyMarkdown), false);
 });
 
 test('renderRecord escapes pipes and newlines inside the findings table', () => {
@@ -592,6 +599,9 @@ test('readIndex folds record and session events and counts skipped lines', async
 
     const index = await readIndex(stateDir);
     assert.equal(index.size, 2);
+    // 4 counted lines: the not-JSON line, the 'null' line (not an object), the 'bogus'
+    // kind line (not an index event), and the session event for the unknown rec-999.
+    // The record event without a recordId and the trailing newline are skipped silently.
     assert.equal(index.skipped, 4);
 
     const first = index.get('rec-001');
