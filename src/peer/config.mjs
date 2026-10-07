@@ -2,26 +2,32 @@
 //
 // Operator configuration for the agent-peer MCP server (contract agent-peer-v1).
 // One JSON file, named by AGENT_PEER_CONFIG, holds absolute paths and limits only —
-// never a credential. Each peer CLI keeps using its own login.
+// never a credential. Each peer CLI keeps using its own login. Codex and Claude Code
+// should point at the SAME file so both see one job ledger and one lineage ledger.
 //
 // {
 //   "schemaVersion": 1,
 //   "stateDir": "E:/.../agent-peer",
 //   "peers": {
-//     "codex":       { "executable": "C:/.../codex.exe", "delegateSandbox": "workspace-write" },
+//     "codex":       { "executable": "C:/.../codex.exe", "reasoningEffort": "high" },
 //     "claude-code": { "executable": "C:/.../claude.exe", "delegatePermissionMode": "acceptEdits" }
 //   },
 //   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3, "maxPromptChars": 200000 }
 // }
+//
+// There is deliberately no free-form argument list: every CLI flag is derived from a
+// validated field, so configuration can never re-open a read-only sandbox.
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CLAUDE_DELEGATE_MODES, CLAUDE_READ_ONLY_TOOLS, CODEX_SANDBOXES } from './cli.mjs';
+import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
 import { PEER_TARGETS, PeerPolicyError } from './chain.mjs';
 
 export const CONFIG_ENV = 'AGENT_PEER_CONFIG';
 export const PEER_CONFIG_SCHEMA_VERSION = 1;
+/** Node timers overflow above 2^31-1 ms and fire after ~1 ms instead. */
+export const MAX_TIMER_MS = 2_147_483_647;
 
 export const DEFAULT_LIMITS = Object.freeze({
   timeoutMs: 30 * 60_000,
@@ -33,8 +39,8 @@ export const DEFAULT_LIMITS = Object.freeze({
 
 const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits'];
 const PEER_KEYS = {
-  codex: ['executable', 'model', 'extraArgs', 'delegateSandbox', 'enabled'],
-  'claude-code': ['executable', 'model', 'extraArgs', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools', 'enabled'],
+  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig'],
+  'claude-code': ['executable', 'enabled', 'model', 'effort', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
 };
 const LIMIT_KEYS = Object.keys(DEFAULT_LIMITS);
 
@@ -47,7 +53,10 @@ function isPlainObject(value) {
 }
 
 function onlyKeys(object, allowed, where) {
-  for (const key of Object.keys(object)) if (!allowed.includes(key)) fail(`${where}.${key} is not a recognized field`, `${where}.${key}`);
+  for (const key of Object.keys(object)) {
+    if (key === 'extraArgs') fail(`${where}.extraArgs is not supported: free-form CLI arguments could override the read-only sandbox`, `${where}.extraArgs`);
+    if (!allowed.includes(key)) fail(`${where}.${key} is not a recognized field`, `${where}.${key}`);
+  }
 }
 
 function absolute(value, field) {
@@ -61,6 +70,18 @@ function stringList(value, field) {
     fail(`${field} must be an array of nonblank strings`, field);
   }
   return [...value];
+}
+
+function optionalEnum(value, allowed, field) {
+  if (value === undefined || value === null) return null;
+  if (!allowed.includes(value)) fail(`${field} must be one of ${allowed.join(', ')}`, field);
+  return value;
+}
+
+function optionalModel(value, field) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !MODEL_RE.test(value)) fail(`${field} is not a valid model identifier`, field);
+  return value;
 }
 
 function positiveInt(value, field) {
@@ -85,14 +106,26 @@ export function normalizePeerConfig(raw) {
       name,
       enabled,
       executable: absolute(value.executable, `peers.${name}.executable`),
-      model: value.model === undefined || value.model === null ? null : String(value.model),
-      extraArgs: stringList(value.extraArgs, `peers.${name}.extraArgs`) ?? [],
+      model: optionalModel(value.model, `peers.${name}.model`),
     };
+    if (/\.(cmd|bat)$/i.test(peer.executable)) {
+      fail(`peers.${name}.executable must be the real executable, not a .cmd/.bat shim (spawned without a shell)`, `peers.${name}.executable`);
+    }
     if (name === 'codex') {
+      peer.reasoningEffort = optionalEnum(value.reasoningEffort, CODEX_EFFORTS, 'peers.codex.reasoningEffort');
+      peer.profile = value.profile === undefined || value.profile === null ? null : String(value.profile);
+      if (peer.profile !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(peer.profile)) fail('peers.codex.profile is not a valid profile name', 'peers.codex.profile');
       peer.delegateSandbox = value.delegateSandbox ?? 'workspace-write';
       if (!CODEX_SANDBOXES.includes(peer.delegateSandbox)) fail(`peers.codex.delegateSandbox must be one of ${CODEX_SANDBOXES.join(', ')}`, 'peers.codex.delegateSandbox');
+      peer.readOnlyIgnoreUserConfig = value.readOnlyIgnoreUserConfig === undefined ? false : value.readOnlyIgnoreUserConfig;
+      if (typeof peer.readOnlyIgnoreUserConfig !== 'boolean') fail('peers.codex.readOnlyIgnoreUserConfig must be a boolean', 'peers.codex.readOnlyIgnoreUserConfig');
     } else {
+      peer.effort = optionalEnum(value.effort, CLAUDE_EFFORTS, 'peers.claude-code.effort');
+      peer.fallbackModel = optionalModel(value.fallbackModel, 'peers.claude-code.fallbackModel');
       peer.readOnlyTools = stringList(value.readOnlyTools, 'peers.claude-code.readOnlyTools') ?? [...CLAUDE_READ_ONLY_TOOLS];
+      if (peer.readOnlyTools.length === 0 || peer.readOnlyTools.some((tool) => !CLAUDE_READ_ONLY_ALLOWED.includes(tool))) {
+        fail(`peers.claude-code.readOnlyTools may only name ${CLAUDE_READ_ONLY_ALLOWED.join(', ')}`, 'peers.claude-code.readOnlyTools');
+      }
       peer.delegatePermissionMode = value.delegatePermissionMode ?? 'acceptEdits';
       if (!CLAUDE_DELEGATE_MODES.includes(peer.delegatePermissionMode)) {
         fail(`peers.claude-code.delegatePermissionMode must be one of ${CLAUDE_DELEGATE_MODES.join(', ')}`, 'peers.claude-code.delegatePermissionMode');
@@ -107,6 +140,7 @@ export function normalizePeerConfig(raw) {
     onlyKeys(raw.limits, LIMIT_KEYS, 'limits');
     for (const [key, value] of Object.entries(raw.limits)) limits[key] = positiveInt(value, `limits.${key}`);
   }
+  if (limits.maxTimeoutMs > MAX_TIMER_MS) fail(`limits.maxTimeoutMs must be at most ${MAX_TIMER_MS}`, 'limits.maxTimeoutMs');
   if (limits.timeoutMs > limits.maxTimeoutMs) fail('limits.timeoutMs must not exceed limits.maxTimeoutMs', 'limits.timeoutMs');
   if (limits.maxWaitMs > 600_000) fail('limits.maxWaitMs must be at most 600000', 'limits.maxWaitMs');
   return Object.freeze({ schemaVersion: PEER_CONFIG_SCHEMA_VERSION, stateDir, peers: Object.freeze(peers), limits: Object.freeze(limits) });

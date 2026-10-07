@@ -5,9 +5,15 @@
 // holding job.json (state), prompt.txt, stdout.log, stderr.log and result.json, so a
 // result outlives the MCP server process that started it.
 //
-// A job that was running when its server process died is reported as `lost` on the
-// next start: its output stream is gone and its outcome is unknown. It is never
-// re-run automatically and an unknown pid is never killed (pids are reused).
+// States: running -> completed | failed, or running -> cancelling -> cancelled, or
+// running -> timing_out -> timed_out. A stop request is NOT a stop: `cancelled` and
+// `timed_out` are only recorded once the process has actually exited. A job whose
+// owning server died while it was active is `lost` (outcome unknown, never re-run);
+// a job owned by another LIVE server sharing the state directory is left alone. An
+// unknown pid is never killed (pids are reused).
+//
+// Each started child is also recorded in the lineage ledger (src/peer/lineage.mjs) so
+// an agent-peer server inside it can prove its delegation chain.
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -17,25 +23,66 @@ import path from 'node:path';
 
 import { PeerPolicyError } from './chain.mjs';
 import { parsePeerOutput } from './cli.mjs';
+import { clearActive, recordActive } from './lineage.mjs';
 
-export const JOB_STATES = Object.freeze(['running', 'completed', 'failed', 'cancelled', 'timed_out', 'lost']);
+export const ACTIVE_JOB_STATES = Object.freeze(['running', 'cancelling', 'timing_out']);
 export const TERMINAL_JOB_STATES = Object.freeze(['completed', 'failed', 'cancelled', 'timed_out', 'lost']);
+export const JOB_STATES = Object.freeze([...ACTIVE_JOB_STATES, ...TERMINAL_JOB_STATES]);
 const MAX_PARSE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_TAIL = 4000;
+const MAX_TIMER_MS = 2_147_483_647;
 const JOB_ID_RE = /^peer-\d{13}-[0-9a-f]{8}$/;
 
-export function defaultKillTree(pid, { spawnImpl = nodeSpawn } = {}) {
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  if (process.platform === 'win32') {
-    const killer = spawnImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', shell: false });
-    killer.on?.('error', () => undefined);
-  } else {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      // already gone
-    }
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
   }
+}
+
+/**
+ * Kill a process tree and report whether that is known to have worked.
+ * Windows: taskkill /T /F (exit 128 = no such process, i.e. already gone).
+ * POSIX: the child was started detached as its own process group; signal the group.
+ */
+export function defaultKillTree(pid, { spawnImpl = nodeSpawn, platform = process.platform } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve({ ok: false, code: 'NO_PID' });
+  if (platform === 'win32') {
+    return new Promise((resolve) => {
+      let killer;
+      try {
+        killer = spawnImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', shell: false });
+      } catch (error) {
+        resolve({ ok: false, code: error?.code ?? 'E_SPAWN' });
+        return;
+      }
+      killer.on('error', (error) => resolve({ ok: false, code: error?.code ?? 'E_SPAWN' }));
+      killer.on('close', (code) => resolve(code === 0 || code === 128 ? { ok: true, code } : { ok: false, code }));
+    });
+  }
+  return new Promise((resolve) => {
+    const signal = (sig) => {
+      try {
+        process.kill(-pid, sig);
+        return true;
+      } catch {
+        try {
+          process.kill(pid, sig);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    };
+    signal('SIGTERM');
+    setTimeout(() => {
+      if (isProcessAlive(pid)) signal('SIGKILL');
+      resolve({ ok: true, code: 'SIGNALLED' });
+    }, 3000).unref?.();
+  });
 }
 
 async function writeJsonAtomic(file, value) {
@@ -48,14 +95,19 @@ export function createPeerJobs({
   stateDir,
   spawnImpl = nodeSpawn,
   killTree = (pid) => defaultKillTree(pid),
+  isAlive = isProcessAlive,
   now = () => Date.now(),
   maxConcurrent = 3,
+  ownerPid = process.pid,
+  shutdownGraceMs = 10_000,
+  lineage = true,
   logger = () => {},
 } = {}) {
   if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'stateDir must be absolute', { field: 'stateDir' });
   const jobsDir = path.join(stateDir, 'jobs');
-  const live = new Map(); // jobId -> { record, child, waiters:Set, stdoutChunks, ... }
-  let recovered = false;
+  const live = new Map(); // jobId -> entry
+  let pendingStarts = 0;
+  let recovered = null;
 
   const dirOf = (jobId) => path.join(jobsDir, jobId);
   const snapshot = (record) => JSON.parse(JSON.stringify(record));
@@ -64,13 +116,16 @@ export function createPeerJobs({
     if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)) throw new PeerPolicyError('PEER_ARGS_INVALID', 'unknown jobId format', { field: 'jobId' });
   }
 
-  async function persist(record) {
-    await writeJsonAtomic(path.join(dirOf(record.jobId), 'job.json'), record);
+  /** Serialized per live job: a later state can never be overwritten by an earlier write. */
+  function persist(entry) {
+    const record = snapshot(entry.record);
+    entry.persistChain = entry.persistChain
+      .then(() => writeJsonAtomic(path.join(dirOf(record.jobId), 'job.json'), record))
+      .catch((error) => logger({ phase: 'persist', jobId: record.jobId, code: error?.code ?? 'E_PERSIST' }));
+    return entry.persistChain;
   }
 
-  async function readRecord(jobId) {
-    assertJobId(jobId);
-    if (live.has(jobId)) return live.get(jobId).record;
+  async function readDisk(jobId) {
     try {
       return JSON.parse(await readFile(path.join(dirOf(jobId), 'job.json'), 'utf8'));
     } catch (error) {
@@ -79,34 +134,69 @@ export function createPeerJobs({
     }
   }
 
-  /** Mark jobs left `running` by a dead server process as `lost`. Idempotent. */
-  async function recover() {
-    if (recovered) return { lost: 0 };
-    recovered = true;
-    await mkdir(jobsDir, { recursive: true });
-    let lost = 0;
-    for (const entry of await readdir(jobsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !JOB_ID_RE.test(entry.name) || live.has(entry.name)) continue;
-      let record;
-      try {
-        record = JSON.parse(await readFile(path.join(jobsDir, entry.name, 'job.json'), 'utf8'));
-      } catch {
-        continue;
-      }
-      if (record.status !== 'running') continue;
-      record.status = 'lost';
-      record.endedAt = now();
-      record.errors = [...(record.errors ?? []), 'the peer server that owned this job stopped; its outcome is unknown and it was not re-run'];
-      await persist(record);
-      lost += 1;
-    }
-    return { lost };
+  /**
+   * An active record that this server does not own is `lost` only when its owner is
+   * provably gone; a job of another live server sharing the state dir is left alone.
+   */
+  async function reconcile(record) {
+    if (!ACTIVE_JOB_STATES.includes(record.status) || live.has(record.jobId)) return record;
+    const ownedHere = record.ownerPid === ownerPid;
+    if (!ownedHere && isAlive(record.ownerPid)) return record;
+    record.status = 'lost';
+    record.endedAt = now();
+    record.errors = [...(record.errors ?? []), 'the peer server that owned this job stopped before its outcome was recorded; the outcome is unknown and it was not re-run'];
+    await writeJsonAtomic(path.join(dirOf(record.jobId), 'job.json'), record);
+    return record;
   }
 
-  function runningCount() {
+  async function readRecord(jobId) {
+    assertJobId(jobId);
+    if (live.has(jobId)) return live.get(jobId).record;
+    return reconcile(await readDisk(jobId));
+  }
+
+  async function listIds() {
+    try {
+      return (await readdir(jobsDir)).filter((name) => JOB_ID_RE.test(name)).sort().reverse();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Reconcile every stale active record once per process. */
+  function recover() {
+    if (!recovered) {
+      recovered = (async () => {
+        await mkdir(jobsDir, { recursive: true });
+        let lost = 0;
+        for (const jobId of await listIds()) {
+          try {
+            const before = await readDisk(jobId);
+            const after = await reconcile(before);
+            if (after.status === 'lost' && ACTIVE_JOB_STATES.includes(before.status)) lost += 1;
+          } catch {
+            // unreadable job directories are skipped
+          }
+        }
+        return { lost };
+      })();
+    }
+    return recovered;
+  }
+
+  function activeCount() {
     let count = 0;
-    for (const entry of live.values()) if (entry.record.status === 'running') count += 1;
+    for (const entry of live.values()) if (ACTIVE_JOB_STATES.includes(entry.record.status)) count += 1;
     return count;
+  }
+
+  async function requestKill(entry, reason) {
+    const outcome = await killTree(entry.record.pid);
+    if (!outcome?.ok) {
+      entry.record.errors.push(`${reason}: process tree kill was not confirmed (${outcome?.code ?? 'unknown'})`);
+      await persist(entry);
+    }
+    return outcome;
   }
 
   async function settle(entry, patch) {
@@ -137,9 +227,9 @@ export function createPeerJobs({
       stderrTail: stderrText.slice(-MAX_STDERR_TAIL),
       ...patch,
     });
-    if (record.status === 'running') {
-      record.status = record.exitCode === 0 && parsed.ok ? 'completed' : 'failed';
-    }
+    if (record.status === 'cancelling') record.status = 'cancelled';
+    else if (record.status === 'timing_out') record.status = 'timed_out';
+    else if (record.status === 'running') record.status = record.exitCode === 0 && parsed.ok ? 'completed' : 'failed';
     try {
       await writeJsonAtomic(path.join(dirOf(record.jobId), 'result.json'), {
         jobId: record.jobId,
@@ -150,15 +240,19 @@ export function createPeerJobs({
         costUsd: record.costUsd,
         eventCounts: parsed.eventCounts ?? null,
       });
-      await persist(record);
     } catch (error) {
-      logger({ phase: 'persist', jobId: record.jobId, code: error?.code ?? 'E_PERSIST' });
+      logger({ phase: 'result', jobId: record.jobId, code: error?.code ?? 'E_PERSIST' });
     }
-    await new Promise((resolve) => (entry.stdoutFile ? entry.stdoutFile.end(resolve) : resolve()));
-    await new Promise((resolve) => (entry.stderrFile ? entry.stderrFile.end(resolve) : resolve()));
+    await persist(entry);
+    if (lineage) await clearActive(stateDir, record.pid).catch(() => undefined);
+    await Promise.all([entry.stdoutFile, entry.stderrFile].map((stream) => new Promise((resolve) => {
+      if (!stream || stream.destroyed || stream.writableFinished) resolve();
+      else stream.end(resolve);
+    })));
+    live.delete(record.jobId);
     for (const wake of entry.waiters) wake();
     entry.waiters.clear();
-    live.delete(record.jobId);
+    entry.resolveSettled();
   }
 
   /** Reserve a job id and its directory paths before the invocation is built. */
@@ -168,60 +262,90 @@ export function createPeerJobs({
     return { jobId, dir, lastMessageFile: path.join(dir, 'last-message.txt') };
   }
 
+  function logStream(file, entry, label) {
+    const stream = createWriteStream(file);
+    stream.on('error', (error) => {
+      entry.record.errors.push(`${label} log unavailable (${error?.code ?? 'E_IO'}); output is still parsed in memory`);
+    });
+    return stream;
+  }
+
   /**
    * Start one peer process. `invocation` comes from buildInvocation, `plan` from
    * planPeerCall, `env` is the already-shaped child environment.
    */
   async function start({ jobId, invocation, plan, prompt, env, timeoutMs, title = null, cwd, sessionIdRequested = null }) {
     assertJobId(jobId);
-    await recover();
-    if (runningCount() >= maxConcurrent) {
-      throw new PeerPolicyError('PEER_BUSY', `${maxConcurrent} peer job(s) already running; wait for one to finish`, { field: 'maxConcurrentJobs' });
+    // Reserve synchronously: no await may run between the capacity check and the reservation.
+    if (activeCount() + pendingStarts >= maxConcurrent) {
+      throw new PeerPolicyError('PEER_BUSY', `${maxConcurrent} peer job(s) already active; wait for one to finish`, { field: 'maxConcurrentJobs' });
     }
-    const dir = dirOf(jobId);
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, 'prompt.txt'), prompt, 'utf8');
-    const args = invocation.args;
-    const startedAt = now();
-    const record = {
-      jobId,
-      target: plan.target,
-      mode: plan.mode,
-      title,
-      chain: plan.chain,
-      depth: plan.depth,
-      rootTask: plan.rootTask,
-      cwd,
-      readOnly: invocation.readOnly,
-      sessionIdRequested,
-      sessionId: sessionIdRequested,
-      status: 'running',
-      pid: null,
-      startedAt,
-      deadlineAt: startedAt + timeoutMs,
-      endedAt: null,
-      exitCode: null,
-      signal: null,
-      errors: [],
-      promptChars: prompt.length,
-    };
-    const entry = {
-      record,
-      child: null,
-      waiters: new Set(),
-      stdoutChunks: [],
-      stderrChunks: [],
-      stdoutBytes: 0,
-      stderrBytes: 0,
-      stdoutFile: createWriteStream(path.join(dir, 'stdout.log')),
-      stderrFile: createWriteStream(path.join(dir, 'stderr.log')),
-      settled: false,
-      timer: null,
-    };
-    live.set(jobId, entry);
+    pendingStarts += 1;
+    let entry;
+    try {
+      await recover();
+      const dir = dirOf(jobId);
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, 'prompt.txt'), prompt, 'utf8');
+      const startedAt = now();
+      const record = {
+        jobId,
+        target: plan.target,
+        mode: plan.mode,
+        title,
+        chain: plan.chain,
+        root: plan.root,
+        depth: plan.depth,
+        rootTask: plan.rootTask,
+        cwd,
+        readOnly: invocation.readOnly,
+        sessionIdRequested,
+        sessionId: sessionIdRequested,
+        status: 'running',
+        ownerPid,
+        pid: null,
+        startedAt,
+        deadlineAt: startedAt + timeoutMs,
+        endedAt: null,
+        exitCode: null,
+        signal: null,
+        errors: [],
+        promptChars: prompt.length,
+      };
+      let resolveSettled;
+      const settledPromise = new Promise((resolve) => { resolveSettled = resolve; });
+      entry = {
+        record,
+        child: null,
+        waiters: new Set(),
+        stdoutChunks: [],
+        stderrChunks: [],
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        settled: false,
+        timer: null,
+        persistChain: Promise.resolve(),
+        settledPromise,
+        resolveSettled,
+      };
+      entry.stdoutFile = logStream(path.join(dir, 'stdout.log'), entry, 'stdout');
+      entry.stderrFile = logStream(path.join(dir, 'stderr.log'), entry, 'stderr');
+      live.set(jobId, entry);
+    } finally {
+      pendingStarts -= 1;
+    }
+
+    const record = entry.record;
     let child;
     try {
-      child = spawnImpl(invocation.command, args, { cwd: invocation.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+      child = spawnImpl(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        shell: false,
+        detached: process.platform !== 'win32',
+      });
     } catch (error) {
       record.errors.push(`spawn failed: ${error?.code ?? error?.message ?? 'E_SPAWN'}`);
       await settle(entry, { status: 'failed', exitCode: null });
@@ -229,22 +353,26 @@ export function createPeerJobs({
     }
     entry.child = child;
     record.pid = child.pid ?? null;
+    if (lineage && record.pid) {
+      await recordActive(stateDir, { pid: record.pid, jobId, chain: plan.chain, target: plan.target, startedAt: record.startedAt })
+        .catch((error) => record.errors.push(`lineage ledger write failed (${error?.code ?? 'E_IO'})`));
+    }
     child.stdout?.on('data', (chunk) => {
       entry.stdoutBytes += chunk.length;
-      entry.stdoutFile.write(chunk);
+      if (!entry.stdoutFile.destroyed) entry.stdoutFile.write(chunk);
       if (entry.stdoutBytes <= MAX_PARSE_BYTES) entry.stdoutChunks.push(chunk);
     });
     child.stderr?.on('data', (chunk) => {
       entry.stderrBytes += chunk.length;
-      entry.stderrFile.write(chunk);
+      if (!entry.stderrFile.destroyed) entry.stderrFile.write(chunk);
       entry.stderrChunks.push(chunk);
-      // Keep only a bounded tail in memory.
       let total = entry.stderrChunks.reduce((sum, item) => sum + item.length, 0);
       while (total > MAX_STDERR_TAIL * 4 && entry.stderrChunks.length > 1) total -= entry.stderrChunks.shift().length;
     });
     child.on('error', (error) => {
       record.errors.push(`process error: ${error?.code ?? error?.message ?? 'E_PROCESS'}`);
-      void settle(entry, { status: record.status === 'running' ? 'failed' : record.status });
+      if (record.status === 'running') record.status = 'failed';
+      void settle(entry, {});
     });
     child.on('close', (code, signal) => {
       void settle(entry, { exitCode: code, signal: signal ?? null });
@@ -252,13 +380,14 @@ export function createPeerJobs({
     child.stdin?.on('error', () => undefined);
     child.stdin?.end(prompt, 'utf8');
     entry.timer = setTimeout(() => {
-      if (entry.settled) return;
-      record.status = 'timed_out';
+      if (entry.settled || record.status !== 'running') return;
+      record.status = 'timing_out';
       record.errors.push(`timed out after ${timeoutMs} ms`);
-      killTree(record.pid);
-    }, timeoutMs);
+      void persist(entry);
+      void requestKill(entry, 'timeout');
+    }, Math.min(timeoutMs, MAX_TIMER_MS));
     entry.timer.unref?.();
-    await persist(record);
+    await persist(entry);
     logger({ phase: 'start', jobId, target: plan.target, mode: plan.mode });
     return snapshot(record);
   }
@@ -266,7 +395,7 @@ export function createPeerJobs({
   async function wait(jobId, waitMs = 0) {
     assertJobId(jobId);
     const entry = live.get(jobId);
-    if (entry && waitMs > 0) {
+    if (entry && waitMs > 0 && !entry.settled) {
       await new Promise((resolve) => {
         const timer = setTimeout(done, waitMs);
         function done() {
@@ -289,7 +418,10 @@ export function createPeerJobs({
     } catch {
       stored = null;
     }
-    const text = stored?.finalMessage ?? '';
+    if (record.status === 'lost' || stored === null) {
+      return { job: snapshot(record), finalMessage: null, complete: true, outcomeUnknown: true, totalChars: 0, offset: 0, nextOffset: null };
+    }
+    const text = typeof stored.finalMessage === 'string' ? stored.finalMessage : '';
     const start = Math.max(0, Math.min(offset, text.length));
     const slice = text.slice(start, start + limit);
     return {
@@ -299,34 +431,51 @@ export function createPeerJobs({
       nextOffset: start + slice.length < text.length ? start + slice.length : null,
       totalChars: text.length,
       complete: true,
+      outcomeUnknown: false,
     };
   }
 
   async function cancel(jobId) {
     assertJobId(jobId);
     const entry = live.get(jobId);
-    if (!entry) return { job: snapshot(await readRecord(jobId)), cancelled: false, reason: 'not running in this server' };
-    if (entry.record.status === 'running') {
-      entry.record.status = 'cancelled';
-      entry.record.errors.push('cancelled by the caller');
-      killTree(entry.record.pid);
+    if (!entry) {
+      const record = await readRecord(jobId);
+      const reason = ACTIVE_JOB_STATES.includes(record.status) ? 'owned by another live peer server' : `already ${record.status}`;
+      return { job: snapshot(record), cancelRequested: false, reason };
     }
-    return { job: snapshot(entry.record), cancelled: true };
+    if (entry.record.status !== 'running') {
+      return { job: snapshot(entry.record), cancelRequested: false, reason: `already ${entry.record.status}` };
+    }
+    entry.record.status = 'cancelling';
+    entry.record.errors.push('cancelled by the caller');
+    await persist(entry);
+    const kill = await requestKill(entry, 'cancel');
+    // `cancelled` is recorded only when the process actually exits (see settle).
+    return { job: snapshot(entry.record), cancelRequested: true, killConfirmed: kill?.ok === true, stopped: entry.settled };
+  }
+
+  /** The newest job that produced `sessionId` for `target`, or null. */
+  async function findSession(target, sessionId) {
+    for (const entry of live.values()) {
+      if (entry.record.target === target && entry.record.sessionId === sessionId) return snapshot(entry.record);
+    }
+    for (const jobId of await listIds()) {
+      try {
+        const record = await readDisk(jobId);
+        if (record.target === target && record.sessionId === sessionId) return record;
+      } catch {
+        // skip unreadable
+      }
+    }
+    return null;
   }
 
   async function list({ limit = 20 } = {}) {
     await recover();
-    let names = [];
-    try {
-      names = (await readdir(jobsDir)).filter((name) => JOB_ID_RE.test(name));
-    } catch {
-      names = [];
-    }
-    names.sort().reverse();
     const jobs = [];
-    for (const name of names.slice(0, Math.max(1, Math.min(limit, 200)))) {
+    for (const jobId of (await listIds()).slice(0, Math.max(1, Math.min(limit, 200)))) {
       try {
-        const record = await readRecord(name);
+        const record = await readRecord(jobId);
         jobs.push({ jobId: record.jobId, target: record.target, mode: record.mode, status: record.status, title: record.title, startedAt: record.startedAt, endedAt: record.endedAt, sessionId: record.sessionId, chain: record.chain });
       } catch {
         // skip unreadable job directories
@@ -335,15 +484,30 @@ export function createPeerJobs({
     return jobs;
   }
 
+  /** Stop every active job of this server and wait (bounded) for the processes to exit. */
   async function close() {
-    for (const entry of live.values()) {
+    const entries = [...live.values()];
+    for (const entry of entries) {
       if (entry.record.status === 'running') {
-        entry.record.status = 'cancelled';
+        entry.record.status = 'cancelling';
         entry.record.errors.push('the peer server shut down');
-        killTree(entry.record.pid);
+      }
+      void persist(entry);
+      void requestKill(entry, 'shutdown');
+    }
+    let timer;
+    await Promise.race([
+      Promise.all(entries.map((entry) => entry.settledPromise)),
+      new Promise((resolve) => { timer = setTimeout(resolve, shutdownGraceMs); }),
+    ]);
+    clearTimeout(timer);
+    for (const entry of entries) {
+      if (!entry.settled) {
+        entry.record.errors.push('the peer server exited before the stop was confirmed');
+        await persist(entry);
       }
     }
   }
 
-  return Object.freeze({ allocate, start, wait, result, cancel, list, recover, close, runningCount, jobsDir });
+  return Object.freeze({ allocate, start, wait, result, cancel, list, recover, findSession, close, activeCount, jobsDir });
 }

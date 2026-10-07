@@ -6,6 +6,9 @@
 //   AGENT_PEER_CONFIG   absolute path of the operator peer config JSON
 // Inherited from a calling harness when this harness was itself started as a peer:
 //   AGENT_BRIDGE_CHAIN, AGENT_BRIDGE_MAX_DEPTH, AGENT_BRIDGE_MAX_DELEGATE_DEPTH, AGENT_BRIDGE_ROOT_TASK
+// The inherited chain is cross-checked against the lineage ledger in the peer state
+// directory (src/peer/lineage.mjs), so a harness that drops those variables when it
+// starts MCP servers still cannot make this server believe it is a root controller.
 //
 // A missing or invalid config does not stop the server: tools/list still works and
 // peer_capabilities reports the problem, so the controller sees why calls are refused.
@@ -13,7 +16,10 @@ import process from 'node:process';
 import readline from 'node:readline';
 
 import { loadPeerConfig } from '../src/peer/config.mjs';
+import { applyLineage, findLedgerAncestor, readProcessTable } from '../src/peer/lineage.mjs';
 import { createPeerServer } from '../src/peer/server.mjs';
+
+const diagnostic = (record) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), component: 'agent-peer', ...record })}\n`);
 
 let config = null;
 let configError = null;
@@ -21,13 +27,27 @@ try {
   config = await loadPeerConfig({ env: process.env });
 } catch (error) {
   configError = error;
-  process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), component: 'agent-peer', phase: 'config', code: error?.code ?? 'E_CONFIG', field: error?.detail?.field ?? null })}\n`);
+  diagnostic({ phase: 'config', code: error?.code ?? 'E_CONFIG', field: error?.detail?.field ?? null });
 }
 
-const server = createPeerServer({ env: process.env, config, configError });
+const resolveLineage = config
+  ? async (env) => {
+      const table = readProcessTable();
+      const ancestor = await findLedgerAncestor({ stateDir: config.stateDir, pid: process.pid, table });
+      const resolved = applyLineage(env, ancestor);
+      diagnostic({ phase: 'lineage', source: resolved.source, ancestorPid: ancestor?.ancestorPid ?? null });
+      return resolved;
+    }
+  : null;
+
+const server = createPeerServer({ env: process.env, config, configError, resolveLineage });
 const reader = server.attach({ input: process.stdin, output: process.stdout, createInterface: readline.createInterface });
+let stopping = false;
 const shutdown = async () => {
+  if (stopping) return;
+  stopping = true;
   reader.close();
+  // Waits (bounded) for every active peer process to exit and records the outcome.
   await server.close();
   process.exit(0);
 };
