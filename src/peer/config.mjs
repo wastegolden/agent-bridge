@@ -21,7 +21,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
+import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_PLUGIN_ID_RE, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
 import { PEER_TARGETS, PeerPolicyError } from './chain.mjs';
 
 export const CONFIG_ENV = 'AGENT_PEER_CONFIG';
@@ -39,7 +39,7 @@ export const DEFAULT_LIMITS = Object.freeze({
 
 const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits'];
 const PEER_KEYS = {
-  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig'],
+  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins'],
   'claude-code': ['executable', 'enabled', 'model', 'effort', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
 };
 const LIMIT_KEYS = Object.keys(DEFAULT_LIMITS);
@@ -119,6 +119,8 @@ export function normalizePeerConfig(raw) {
       if (!CODEX_SANDBOXES.includes(peer.delegateSandbox)) fail(`peers.codex.delegateSandbox must be one of ${CODEX_SANDBOXES.join(', ')}`, 'peers.codex.delegateSandbox');
       peer.readOnlyIgnoreUserConfig = value.readOnlyIgnoreUserConfig === undefined ? false : value.readOnlyIgnoreUserConfig;
       if (typeof peer.readOnlyIgnoreUserConfig !== 'boolean') fail('peers.codex.readOnlyIgnoreUserConfig must be a boolean', 'peers.codex.readOnlyIgnoreUserConfig');
+      peer.readOnlyDisablePlugins = stringList(value.readOnlyDisablePlugins, 'peers.codex.readOnlyDisablePlugins') ?? [];
+      if (peer.readOnlyDisablePlugins.some((id) => !CODEX_PLUGIN_ID_RE.test(id))) fail('peers.codex.readOnlyDisablePlugins must hold plugin ids like name@marketplace', 'peers.codex.readOnlyDisablePlugins');
     } else {
       peer.effort = optionalEnum(value.effort, CLAUDE_EFFORTS, 'peers.claude-code.effort');
       peer.fallbackModel = optionalModel(value.fallbackModel, 'peers.claude-code.fallbackModel');

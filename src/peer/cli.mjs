@@ -36,13 +36,17 @@ export const CLAUDE_READ_ONLY_ALLOWED = Object.freeze(['Read', 'Grep', 'Glob', '
 /** Built-ins that can change files, run commands or spawn agents: always denied when read-only. */
 export const CLAUDE_WRITE_TOOLS = Object.freeze(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Task', 'Agent']);
 export const CODEX_SANDBOXES = Object.freeze(['read-only', 'workspace-write']);
-export const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh']);
+export const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+/** Codex plugin selector `name@marketplace`, used to disable plugins for read-only runs. */
+export const CODEX_PLUGIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const CLAUDE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 export const CLAUDE_DELEGATE_MODES = Object.freeze(['acceptEdits', 'auto', 'dontAsk']);
 export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$/;
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+// Built-in names (Read) and MCP rules (mcp__plugin_agent-bridge_dsh_project, optionally
+// __tool). No spaces, parentheses or wildcards: those would change rule semantics.
+const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
 /**
  * Session-identity variables of the CALLING harness. A child harness must start its
@@ -120,6 +124,12 @@ export function buildInvocation(request, peer) {
       ...(peer.reasoningEffort ? ['-c', `model_reasoning_effort="${peer.reasoningEffort}"`] : []),
       ...(peer.profile ? ['-p', peer.profile] : []),
       ...(readOnly && peer.readOnlyIgnoreUserConfig === true ? ['--ignore-user-config'] : []),
+      // MCP tools are outside the shell sandbox; plugins whose tools are pre-approved are
+      // switched off for read-only runs so a reviewer cannot act through them.
+      ...(readOnly ? (peer.readOnlyDisablePlugins ?? []).flatMap((id) => {
+        if (!CODEX_PLUGIN_ID_RE.test(id)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid codex plugin id in readOnlyDisablePlugins', { field: 'readOnlyDisablePlugins' });
+        return ['-c', `plugins."${id}".enabled=false`];
+      }) : []),
       '-o', request.lastMessageFile,
     ];
     const args = sessionId === null

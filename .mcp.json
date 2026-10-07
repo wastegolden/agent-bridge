@@ -6,6 +6,7 @@
         "./bin/bridge.mjs"
       ],
       "tool_timeout_sec": 75,
+      "default_tools_approval_mode": "approve",
       "env": {
         "DSH_BRIDGE_URL": "http://127.0.0.1:3080/mcp/codex-bridge-v1"
       }
@@ -16,6 +17,7 @@
         "./bin/peer-mcp.mjs"
       ],
       "tool_timeout_sec": 75,
+      "default_tools_approval_mode": "approve",
       "env": {
         "AGENT_BRIDGE_SELF": "codex",
         "AGENT_PEER_CONFIG": ""

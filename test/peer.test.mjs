@@ -113,9 +113,14 @@ test('codex invocations keep review read-only and pin the sandbox last', () => {
   assert.throws(() => buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, addDirs: [ABS] }, codexPeer()), { code: 'PEER_ARGS_INVALID' });
   assert.throws(() => buildInvocation({ target: 'codex', mode: 'review', cwd: 'relative', lastMessageFile }, codexPeer()), { code: 'PEER_ARGS_INVALID' });
   assert.throws(() => buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, sessionId: '--last' }, codexPeer()), { code: 'PEER_ARGS_INVALID' });
-  const isolated = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), readOnlyIgnoreUserConfig: true } } }).peers.codex;
-  assert.ok(buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile }, isolated).args.includes('--ignore-user-config'));
-  assert.ok(!buildInvocation({ target: 'codex', mode: 'delegate', cwd: ABS, lastMessageFile }, isolated).args.includes('--ignore-user-config'));
+  const isolated = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), readOnlyIgnoreUserConfig: true, readOnlyDisablePlugins: ['agent-bridge@personal'], reasoningEffort: 'max' } } }).peers.codex;
+  const reviewArgs = buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile }, isolated).args;
+  assert.ok(reviewArgs.includes('--ignore-user-config'));
+  assert.ok(reviewArgs.includes('plugins."agent-bridge@personal".enabled=false'), 'pre-approved plugin MCP tools are off for read-only runs');
+  const delegateArgs = buildInvocation({ target: 'codex', mode: 'delegate', cwd: ABS, lastMessageFile }, isolated).args;
+  assert.ok(!delegateArgs.includes('--ignore-user-config'));
+  assert.ok(!delegateArgs.includes('plugins."agent-bridge@personal".enabled=false'), 'a sub-controller keeps the bridge and peer tools');
+  assert.throws(() => normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), readOnlyDisablePlugins: ['x".enabled=true #'] } } }), { code: 'PEER_CONFIG_INVALID' });
 });
 
 test('claude review exposes only read-only built-ins, no MCP, and denies write tools', () => {
