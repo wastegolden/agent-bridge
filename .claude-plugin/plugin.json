@@ -1,17 +1,16 @@
 {
   "name": "agent-bridge",
   "displayName": "Agent Bridge (DSH · Codex · Claude Code)",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Controller tools for multi-harness work: delegate bounded tasks to DeepSeek Harness workers (dsh_project bridge_* tools) and consult, cross-review or appoint the other harness as sub-controller (agent_peer peer_* tools), with one root controller per task and no delegation loops.",
   "author": { "name": "Local developer" },
   "keywords": ["dsh", "deepseek", "codex", "multi-agent", "delegation", "cross-review"],
   "mcpServers": {
     "dsh_project": {
-      "command": "${user_config.node_path}",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bridge.mjs"],
-      "env": {
-        "DSH_BRIDGE_URL": "${user_config.dsh_bridge_url}",
-        "DSH_BRIDGE_CREDENTIAL_FILE": "${user_config.dsh_credential_file}"
+      "type": "http",
+      "url": "${user_config.dsh_bridge_url}",
+      "headers": {
+        "Authorization": "Bearer ${DSH_MCP_TOKEN}"
       }
     },
     "agent_peer": {
@@ -27,21 +26,15 @@
     "node_path": {
       "type": "file",
       "title": "Node.js 24 executable",
-      "description": "Absolute path of node.exe (Node 24 or later) used to run the bridge carrier and the peer server. Use plain 'node' only if it is on PATH for Claude Code.",
+      "description": "Absolute path of node.exe (Node 24 or later) used to run the agent_peer server. Plain 'node' works only when node is on the PATH the Claude app was started with; the desktop app usually has no such PATH.",
       "default": "node",
       "required": true
     },
     "dsh_bridge_url": {
       "type": "string",
       "title": "DSH bridge endpoint",
-      "description": "HTTP endpoint the DSH host mounts for the bridge.",
+      "description": "HTTP endpoint the DSH host mounts for the bridge. dsh_project connects to it directly over MCP HTTP and sends DSH_MCP_TOKEN from the environment as the bearer token.",
       "default": "http://127.0.0.1:3080/mcp/codex-bridge-v1"
-    },
-    "dsh_credential_file": {
-      "type": "file",
-      "title": "Bridge credential file",
-      "description": "File holding the bridge bearer token. Leave empty to use DSH_MCP_TOKEN from the environment or the default $DSH_HOME/codex-bridge-v1/bridge-token.",
-      "default": ""
     },
     "peer_config": {
       "type": "file",

@@ -1,3 +1,11 @@
+# 1.5.1 — Claude Code connects without a global node (2026-10-09)
+
+- Symptom: in the Claude desktop app both `dsh_project` and `agent_peer` closed at start (`'node' is not recognized…`, CONNECTION_CLOSED). Claude Code ran the 1.4.0 copy it had cached on 2026-10-07: its manifest still defaulted `node_path` to the literal `node`, and the root `.mcp.json` — the Codex template, `node ./bin/*.mjs` with `AGENT_BRIDGE_SELF: codex` — is also read by Claude Code. The desktop app has no node on its PATH.
+- Claude Code `dsh_project` now connects to the bridge directly over MCP HTTP (`type: http`, `url` from `userConfig.dsh_bridge_url`, `Authorization: Bearer ${DSH_MCP_TOKEN}` from the user environment), like Codex; the stdio carrier is no longer used by Claude Code and `userConfig.dsh_credential_file` is gone. `agent_peer` still needs node and keeps `userConfig.node_path`.
+- The Codex MCP template is renamed `.codex-mcp.json` (referenced by `.codex-plugin/plugin.json`), so Claude Code no longer picks it up. The machine copy of the Codex plugin keeps its own `.mcp.json`; `deploy-local.mjs` points the copied manifest at it.
+- `deploy-local.mjs` now refreshes Claude Code's plugin cache (`claude plugin marketplace update` + `claude plugin update`, optional `claudeExecutable`/`claudePluginId`), resolves `*` segments in the Codex/Claude executable paths to the newest install, and no longer requires `credentialFile`.
+- Plugin manifests only; the DSH host component is unchanged (`BRIDGE_VERSION` stays 1.5.0).
+
 # 1.5.0 — closeout records and automatic session cleanup (2026-10-07)
 
 - `bridge_dossier` (bridge 1.5.0, 19 tools): read-only closeout data for one owned task — the submitted request (material text never copied), effective route, workspace, review/refresh/integration evidence (stdout/stderr bounded to the last 4000 chars), acknowledgement, archive and stop state.

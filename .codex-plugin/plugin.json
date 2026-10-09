@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "1.5.0+codex.20261007.dsh020",
+  "version": "1.5.1+codex.20261009.dsh020",
   "description": "Bounded parallel DSH development plus cross-harness consult, review and delegation with Claude Code, under one root controller per task",
   "author": {
     "name": "Local developer"
@@ -15,5 +15,5 @@
     "capabilities": [],
     "defaultPrompt": "Plan this development task, define interfaces, delegate bounded implementation to DSH and cross-check risky decisions with Claude Code."
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.codex-mcp.json"
 }

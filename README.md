@@ -5,7 +5,7 @@
 | 组成 | 作用 | 谁在用 |
 |---|---|---|
 | DSH 宿主插件（`dsh-host/`、`src/*`） | 在 DSH 内调度有边界的 Flash 任务、worktree、审查与集成，HTTP 端点 `/mcp/codex-bridge-v1` | DSH |
-| `dsh_project`（`bin/bridge.mjs`） | stdio → HTTP 转发，暴露 `bridge_*` 工具 | Codex、Claude Code |
+| `dsh_project` | 暴露 `bridge_*` 工具：Claude Code 直接走 MCP HTTP（`Bearer ${DSH_MCP_TOKEN}`）；Codex 可走 HTTP 或 `bin/bridge.mjs` stdio → HTTP 转发 | Codex、Claude Code |
 | `agent_peer`（`bin/peer-mcp.mjs`） | 无头调用另一个 harness：`consult`、只读 `review`、作为代理主控 `delegate` | Codex、Claude Code |
 | 唤醒 | Codex：`bin/wake-controller.mjs`；Claude Code：`bin/wake-claude.mjs`（`--wait`/`--follow` + 显式 `--ack`） | 各自主控 |
 | skills | `dsh-project-execution`（DSH 通道），`agent-bridge-routing`（分工、防套娃、多模型互证） | 两边共用 |
@@ -13,7 +13,8 @@
 规则：每个任务只有一个根主控（用户正在对话的那个 harness）；任务沿链向下派发、结果沿链向上返回。
 `agent_peer` 服务端强制执行：不能调用自己、不能调用链上已有的任何 harness（因此永远不会委托回主控）、
 跳数和 delegate 深度有上限；DSH worker 不能调用 Codex 或 Claude Code。插件清单：
-`.codex-plugin/plugin.json`（Codex）与 `.claude-plugin/plugin.json`（Claude Code）。持久化标识
+`.codex-plugin/plugin.json` + `.codex-mcp.json`（Codex）与 `.claude-plugin/plugin.json`（Claude Code，MCP 服务内联在清单里）。
+Codex 的 MCP 模板不能叫根目录 `.mcp.json`：Claude Code 也会读插件根目录的 `.mcp.json`。持久化标识
 （`origin: codex-bridge`、端点、宿主插件 id）保持不变，旧任务库与 worktree 继续可用。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 以下为 1.2.0/1.3.0 时期的原始说明（文中“Codex 负责……”应理解为“提交任务的主控负责……”）。
@@ -26,7 +27,7 @@ Codex 负责需求、接口合同、任务边界、验收与集成；DSH 默认�
 
 1.2.0 把两条已验收组件（核心 supervisor/子会话/作业、回调 outbox/runner）接成可用产品：宿主 `eventWake` 配置、受信控制器入口、摘要上限对齐与关停生命周期。适配器版本 0.4.0。
 
-本目录是新插件源码。`dsh-host/index.cjs` 是 DSH 宿主插件；`.codex-plugin/plugin.json`、`.mcp.json` 和 `skills/dsh-project-execution/` 是 Codex 插件部分。连接安装与机器级 subagent 路由独立：本安装器不改全局 AGENTS、agent shim、Codex 设置或原 v0.3 桥。
+本目录是新插件源码。`dsh-host/index.cjs` 是 DSH 宿主插件；`.codex-plugin/plugin.json`、`.codex-mcp.json`（1.5.1 前名为 `.mcp.json`）和 `skills/dsh-project-execution/` 是 Codex 插件部分。连接安装与机器级 subagent 路由独立：本安装器不改全局 AGENTS、agent shim、Codex 设置或原 v0.3 桥。
 
 ## 实现边界
 
@@ -120,7 +121,7 @@ node bin/wake-controller.mjs --config ... --reconcile <eventId> --delivered true
 
 锁不可自动回收：进程死亡后残留的 `state.lock`/`runner.lock` 必须由操作人执行离线恢复——停掉所有生产者与 runner、确认无存活持有者，再只删除该锁文件。宿主确认关停时才会关闭它拥有的 outbox；停止未确认时 outbox、store 与宿主租约一起保留，等待下次 close 重试。
 
-Codex 的 `.mcp.json` 通过 `node ./bin/bridge.mjs` 使用 stdio 连接。转发程序读取 `DSH_MCP_TOKEN`，或 `DSH_BRIDGE_CREDENTIAL_FILE` 指定的文件；默认文件为 `$DSH_HOME/codex-bridge-v1/bridge-token`（未设置 `DSH_HOME` 时使用用户主目录下 `.dsh`）。宿主和转发程序必须使用同一凭据。默认服务地址是 `http://127.0.0.1:3080/mcp/codex-bridge-v1`，可用 `DSH_BRIDGE_URL` 覆盖。自定义 DSH 安装目录时，在 Codex 安装副本的 `.mcp.json` 中设置 `env.DSH_HOME`；凭据文件保存在运行数据目录中。
+Codex 的 MCP 模板 `.codex-mcp.json` 通过 `node ./bin/bridge.mjs` 使用 stdio 连接（安装副本里叫 `.mcp.json`，也可以改成直接 `url` + `bearer_token_env_var`）。转发程序读取 `DSH_MCP_TOKEN`，或 `DSH_BRIDGE_CREDENTIAL_FILE` 指定的文件；默认文件为 `$DSH_HOME/codex-bridge-v1/bridge-token`（未设置 `DSH_HOME` 时使用用户主目录下 `.dsh`）。宿主和转发程序必须使用同一凭据。默认服务地址是 `http://127.0.0.1:3080/mcp/codex-bridge-v1`，可用 `DSH_BRIDGE_URL` 覆盖。自定义 DSH 安装目录时，在 Codex 安装副本的 `.mcp.json` 中设置 `env.DSH_HOME`；凭据文件保存在运行数据目录中。
 
 安装 Codex 插件后开启新对话加载工具和技能。DSH 必须保持运行；转发程序不会自行启动宿主。模型 API Key 仍通过 DSH 自身的设置界面配置，桥接凭据不能代替模型 API Key。
 
