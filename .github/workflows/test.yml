@@ -20,10 +20,13 @@ jobs:
           node-version: 24
       - name: Install dev dependencies (DSH LLM seam used by the adapter tests)
         run: npm install --no-audit --no-fund
-      # The lineage ledger reads the process table through CIM; a cold WMI on a fresh
-      # runner can take longer than the 20 s read timeout and fail a root claim closed.
-      - name: Warm up WMI
-        shell: pwsh
-        run: Get-CimInstance Win32_Process -Property ProcessId | Out-Null
+      # The lineage ledger reads the process table through Windows PowerShell 5.1 + CIM
+      # (src/peer/lineage.mjs) with a 20 s timeout. On a fresh runner the first
+      # powershell.exe start and a cold WMI, under a fully parallel suite, can exceed it
+      # and fail a root claim closed, so warm up the same binary with the same query and
+      # run the suite with bounded concurrency.
+      - name: Warm up Windows PowerShell and WMI
+        shell: powershell
+        run: Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress | Out-Null
       - name: Test
-        run: npm test
+        run: node --test --test-concurrency=2 test/*.test.mjs
