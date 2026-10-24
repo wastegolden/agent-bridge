@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Let Claude Code, Codex and DeepSeek Harness (DSH) call each other: bounded DSH worker tasks, cross-harness consult/review/delegate, one root controller per task, no delegation loops.",
   "license": "MIT",
   "private": true,

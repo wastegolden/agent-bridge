@@ -2,7 +2,7 @@
 
 # Agent Bridge
 
-Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to the other harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 1.6.1, MIT.
+Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to the other harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 1.6.2, MIT.
 
 > Independent project; not affiliated with, or endorsed by, DeepSeek, OpenAI or Anthropic.
 
@@ -42,7 +42,7 @@ The host bridge is a DSH plugin. It mounts the MCP endpoint `/mcp/codex-bridge-v
 - network access is declared by the packet too, and is available only when granted;
 - the lifecycle is review → integrate → acknowledge → archive / cleanup, and every step requires the previous step's real evidence.
 
-It exposes 19 `bridge_*` tools (the host's `bridge_capabilities` reports `version` **1.5.0**, which is not the plugin version 1.6.1):
+It exposes 19 `bridge_*` tools (the host's `bridge_capabilities` reports `version` **1.5.0**, which is not the plugin version 1.6.2):
 
 - tasks: `bridge_submit`, `bridge_check`, `bridge_result`, `bridge_dossier`
 - authorization: `bridge_approve`, `bridge_clarify`
@@ -245,7 +245,7 @@ There is deliberately no free-form argument list: every CLI flag is generated fr
 
 ## Verify
 
-1. Call `bridge_capabilities`: the host should report `version` `1.5.0` (the plugin version is 1.6.1 — these differ).
+1. Call `bridge_capabilities`: the host should report `version` `1.5.0` (the plugin version is 1.6.2 — these differ).
 2. Call `peer_capabilities`: `self` should be `claude-code` on the Claude side and `codex` on the Codex side; `chain` shows your position, and every peer/mode pair states whether it is allowed and, if not, with which error code.
 
 ## Usage

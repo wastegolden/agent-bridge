@@ -1,3 +1,7 @@
+# 1.6.2 — process-table read independent of filtered MCP environments (2026-10-24)
+
+- The Windows lineage read (`src/peer/lineage.mjs`) spawns Windows PowerShell by absolute path under `SystemRoot` and fills only missing Windows system variables (`SystemRoot`, `windir`, `ComSpec`, `TEMP`, `TMP`, `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`, `PATHEXT`; case-insensitive, never overriding a present value). A harness that starts the peer server with a filtered environment (only `PATH` and `SystemRoot` in the stdio test) made the read time out on GitHub Actions, so the root claim failed closed. Query, timeout, parsing and the POSIX branch are unchanged. Implemented by a DSH Flash worker (task b387207a).
+- CI warms up Windows PowerShell 5.1 + WMI with the exact product query and runs the suite with `--test-concurrency=2`.
 # 1.6.1 — CI on Windows runners with 8.3 TEMP paths (2026-10-24)
 
 - Fix: a long-task worker that named an envelope directory through another spelling (Windows 8.3 short name, junction or symlink) was refused as `project/grant-widened`. Worker-requested `readRoots`/`writeRoots` are now canonicalized with `resolvedPath()` (realpath of the nearest existing ancestor) before the envelope check, the same canonicalization the packet applies to the envelope, and are stored canonical; an unresolvable root is `project/invalid-request`. Regression test with a junction/symlink alias. Found because GitHub Actions' TEMP is `C:\Users\RUNNER~1\...` (24 of the 32 CI failures).
