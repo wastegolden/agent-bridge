@@ -79,7 +79,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 ## 环境要求
 
-- **DSH 0.2.0-rc.2**（本项目正是在这个版本上验证的），宿主在 `127.0.0.1:3080` 运行。
+- **DSH 0.2.0-rc.2**（本项目正是在这个版本上验证的）。下文以宿主监听 `127.0.0.1:3080` 为例；你的 DSH 监听别的端口时，相应修改 `dsh_bridge_url` / `bridgeUrl`。
 - **Node.js 24 及以上**。不需要在 PATH 里，用绝对路径的 `node.exe` 即可。
 - **Windows**（已实测；其他平台有代码路径但未验证）。
 - **Claude Code 和/或 Codex**。
@@ -129,7 +129,13 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 ```
 
 - `ownerId` 是持久化身份：沿用已有安装的值，否则旧任务认领不到。缺省值是 `codex-bridge-v1`。
-- `credentialFile` 的文件内容就是 bearer 令牌，客户端通过 `DSH_MCP_TOKEN` 发送它。
+- `credentialFile` 的文件内容就是 bearer 令牌，客户端通过 `DSH_MCP_TOKEN` 发送它。**宿主不会替你生成令牌**，安装前自己生成一个随机值写进这个文件，再把同一个值设成用户环境变量 `DSH_MCP_TOKEN`：
+
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <某个私有目录>/bridge-token.txt
+  ```
+
+  不写 `credentialFile` 时，宿主改从它自己进程环境里的 `DSH_MCP_TOKEN` 读令牌。
 - `maxConcurrent` 缺省 4。
 - `retention` 是 DSH 任务会话的保留期（缺省 7 / 30 天），与下面 agent-peer 记录的 3 / 30 天是两套策略。
 - `rootCallbackGrants`、`eventWake` 是可选的控制器唤醒配置，不写就是关闭。`eventWake.maxSummaryChars` 如果给出，必须正好是 8192（默认值），这是固定的线路上限。
@@ -139,10 +145,16 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 ```bash
 claude plugin marketplace add <owner>/agent-bridge
 claude plugin install agent-bridge@agent-bridge
-claude plugin configure agent-bridge
+claude plugin configure agent-bridge@agent-bridge
 ```
 
-市场名和插件名都来自 `.claude-plugin/marketplace.json`（`agent-bridge` / `agent-bridge`）。安装后在插件配置里设置三个选项：
+市场名和插件名都来自 `.claude-plugin/marketplace.json`（`agent-bridge` / `agent-bridge`）。`configure` 不带参数时只显示选项和哪些还没设；要写入，就把一个 JSON 对象从标准输入传给 `--values-stdin`，没写到的选项保持原值：
+
+```bash
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/agent-peer.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+```
+
+三个选项：
 
 - `node_path`：Node 24 的 `node.exe` 绝对路径（默认值是字面量 `node`）。
 - `peer_config`：agent-peer 配置文件的绝对路径（见第 5 小节）。
@@ -226,7 +238,7 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 - `peers.codex.reasoningEffort` / `peers.codex.model`：可选，且是**全局**的——对每一次 Codex peer 调用都生效。
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`：`delegate` 模式的权限模式与允许的工具；`review` / `consult` 走只读工具集与 `--no-session-persistence`。
 - `records`：记录目录名、接受后的保留天数、失败/争议的保留天数、清扫间隔、Claude 会话目录。
-- `bridge`：DSH 端点，可选 `credentialFile`（不给就先读 `DSH_MCP_TOKEN`）。
+- `bridge`：清扫器使用的 DSH 端点；令牌优先取 `DSH_MCP_TOKEN`，`credentialFile` 是可选的后备。
 - `limits`：超时、并发等上限。
 
 配置里没有自由形状的参数列表：每个 CLI flag 都由校验过的字段生成，所以配置无法重新打开只读沙箱。

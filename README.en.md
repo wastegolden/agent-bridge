@@ -79,7 +79,7 @@ For compatibility with existing installs the persisted ids are still the old one
 
 ## Requirements
 
-- **DSH 0.2.0-rc.2** (the version this was verified on), running on `127.0.0.1:3080`.
+- **DSH 0.2.0-rc.2** (the version this was verified on). The examples assume the host listens on `127.0.0.1:3080`; if yours listens elsewhere, change `dsh_bridge_url` / `bridgeUrl` accordingly.
 - **Node.js 24 or later.** It does not need to be on PATH; an absolute path to `node.exe` is fine.
 - **Windows** (verified; other platforms have code paths but are untested).
 - **Claude Code and/or Codex**.
@@ -129,7 +129,13 @@ Example host config (replace the paths):
 ```
 
 - `ownerId` is a persisted identity: keep the value an existing install used, or old tasks cannot be claimed. The default is `codex-bridge-v1`.
-- The content of `credentialFile` is the bearer token; clients send it as `DSH_MCP_TOKEN`.
+- The content of `credentialFile` is the bearer token; clients send it as `DSH_MCP_TOKEN`. **The host does not generate a token for you**: before installing, write a random value into that file and set the same value as the user environment variable `DSH_MCP_TOKEN`:
+
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <somewhere private>/bridge-token.txt
+  ```
+
+  Without `credentialFile`, the host reads the token from `DSH_MCP_TOKEN` in its own process environment.
 - `maxConcurrent` defaults to 4.
 - `retention` is the retention of DSH task sessions (default 7 / 30 days). It is a different policy from the 3 / 30 days of the agent-peer records below.
 - `rootCallbackGrants` and `eventWake` are optional controller wake-ups; absent means off. If `eventWake.maxSummaryChars` is given it must be exactly 8192 (the default) — that is the fixed wire limit.
@@ -139,10 +145,16 @@ Example host config (replace the paths):
 ```bash
 claude plugin marketplace add <owner>/agent-bridge
 claude plugin install agent-bridge@agent-bridge
-claude plugin configure agent-bridge
+claude plugin configure agent-bridge@agent-bridge
 ```
 
-The marketplace name and the plugin name both come from `.claude-plugin/marketplace.json` (`agent-bridge` / `agent-bridge`). Then set three plugin options:
+The marketplace name and the plugin name both come from `.claude-plugin/marketplace.json` (`agent-bridge` / `agent-bridge`). Without flags, `configure` only shows the options and which are unset; to save values, pipe a JSON object into `--values-stdin` (options left out keep their values):
+
+```bash
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<path>/agent-peer.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+```
+
+The three options:
 
 - `node_path`: absolute path of the Node 24 `node.exe` (the default is the literal `node`).
 - `peer_config`: absolute path of the agent-peer config file (see 5 below).
@@ -226,7 +238,7 @@ The main keys:
 - `peers.codex.reasoningEffort` / `peers.codex.model`: optional, and **global** — they apply to every Codex peer call.
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`: permission mode and allowed tools for `delegate`; `review` / `consult` use the read-only tool set and `--no-session-persistence`.
 - `records`: record directory name, retention after acceptance, retention for failed/disputed work, sweep interval, and the Claude sessions directory.
-- `bridge`: the DSH endpoint, plus an optional `credentialFile` (otherwise `DSH_MCP_TOKEN` is read first).
+- `bridge`: the DSH endpoint used by the cleanup sweeper; the token comes from `DSH_MCP_TOKEN` first, with an optional `credentialFile` as the fallback.
 - `limits`: timeout, concurrency and the other bounds.
 
 There is deliberately no free-form argument list: every CLI flag is generated from a validated field, so configuration cannot reopen the read-only sandbox.
