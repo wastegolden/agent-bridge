@@ -85,7 +85,7 @@ nothing and keeps the unchanged defaults (no shell, no native delegation).
   treat `bridge_capabilities` `liveTransport`/`runnerAvailable`/`liveAck` of `unknown`
   as unverified until an actual run observes a positive exact-target acknowledgement.
 
-Relay the host and per-packet requirements from [README.md](../../README.md) and
+Relay the host and per-packet requirements from [docs/reference/dsh-bridge-reference.zh.md](../../docs/reference/dsh-bridge-reference.zh.md) and
 [docs/event-wake.md](../../docs/event-wake.md). The wake runner is a controller-side
 process, never a worker tool, and each controller consumes only its own per-target
 outbox (`<stateRoot>/t-<sha256(targetId)>`):
