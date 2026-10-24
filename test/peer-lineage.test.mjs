@@ -80,3 +80,60 @@ test('the real process table contains this process and its parent', () => {
   assert.ok(live.has(process.pid));
   assert.equal(live.get(process.pid).ppid, process.ppid);
 });
+
+// The Windows query the module sends; copied so an accidental rewrite of the flags,
+// the query or the process-table shape is caught by the tests below.
+const WINDOWS_QUERY = 'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress';
+const WINDOWS_STDOUT = '[{"ProcessId":10,"ParentProcessId":1,"CreationDate":"/Date(1000)/"}]';
+
+function windowsSpawnStub() {
+  const calls = [];
+  const spawnSyncImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: WINDOWS_STDOUT };
+  };
+  return { calls, spawnSyncImpl };
+}
+
+test('the Windows read spawns absolute PowerShell with a filled environment', () => {
+  const { calls, spawnSyncImpl } = windowsSpawnStub();
+  const source = { PATH: 'C:\\x', SystemRoot: 'C:\\Win' };
+  const table = readProcessTable({ spawnSyncImpl, platform: 'win32', env: source });
+
+  assert.equal(calls.length, 1);
+  const { command, args, options } = calls[0];
+  assert.equal(command, 'C:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.deepEqual(args, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_QUERY]);
+
+  assert.equal(options.env.PATH, 'C:\\x');
+  assert.equal(options.env.SystemRoot, 'C:\\Win');
+  assert.equal(options.env.windir, 'C:\\Win');
+  assert.equal(options.env.ComSpec, 'C:\\Win\\System32\\cmd.exe');
+  for (const name of ['TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'PATHEXT']) {
+    assert.equal(typeof options.env[name], 'string', `${name} must be filled`);
+    assert.notEqual(options.env[name], '', `${name} must not be empty`);
+  }
+  assert.deepEqual(Object.keys(options.env).sort(), ['PATH', 'SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'windir', 'ComSpec', 'LOCALAPPDATA', 'APPDATA', 'PATHEXT'].sort());
+
+  // The caller's environment is read, not written through.
+  assert.deepEqual(source, { PATH: 'C:\\x', SystemRoot: 'C:\\Win' });
+
+  assert.equal(table.size, 1);
+  assert.deepEqual(table.get(10), { ppid: 1, createdAt: 1000 });
+});
+
+test('a case-variant system variable counts as present and is not duplicated', () => {
+  const { calls, spawnSyncImpl } = windowsSpawnStub();
+  readProcessTable({ spawnSyncImpl, platform: 'win32', env: { SYSTEMROOT: 'D:\\W', TEMP: 'T:\\keep' } });
+
+  const { command, options } = calls[0];
+  assert.ok(command.startsWith('D:\\W\\'), command);
+  assert.equal(command, 'D:\\W\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.equal(options.env.SYSTEMROOT, 'D:\\W');
+  assert.equal(Object.hasOwn(options.env, 'SystemRoot'), false);
+  assert.equal(options.env.TEMP, 'T:\\keep');
+  assert.equal(typeof options.env.TMP, 'string');
+  assert.notEqual(options.env.TMP, '');
+  assert.equal(Object.keys(options.env).filter((key) => key.toLowerCase() === 'systemroot').length, 1);
+  assert.equal(Object.keys(options.env).filter((key) => key.toLowerCase() === 'temp').length, 1);
+});

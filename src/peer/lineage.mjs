@@ -17,9 +17,16 @@
 //
 // A stale entry can only make a chain longer (more refusals), never shorter, so pid
 // reuse fails safe. Ancestry lookup errors are reported; they never invent a chain.
+//
+// On Windows the process table is read with an absolute Windows PowerShell path and a
+// completed child environment: an MCP server can be started with a filtered environment
+// (observed on CI: the same query timed out under a harness-provided PATH/SystemRoot-only
+// environment), so neither the lookup nor the child's settings may depend on what the
+// server happened to inherit.
 
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { HARNESSES, PeerPolicyError, formatChain, parseChain } from './chain.mjs';
@@ -54,17 +61,68 @@ function parseWmiDate(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+const WINDOWS_PATHEXT = '.COM;.EXE;.BAT;.CMD';
+const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
+
+/** The actual key of `name` in `env`; Windows environment names are case-insensitive. */
+function envKey(env, name) {
+  const wanted = name.toLowerCase();
+  return Object.keys(env).find((key) => key.toLowerCase() === wanted) ?? null;
+}
+
+/** First non-empty value among case-variant spellings of `names`, or undefined. */
+function envValue(env, names) {
+  for (const name of names) {
+    const key = envKey(env, name);
+    if (key === null) continue;
+    const value = env[key];
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return undefined;
+}
+
+/** Fill a missing (absent or empty) variable without ever adding a second case variant. */
+function fillEnvValue(env, name, value) {
+  if (envValue(env, [name]) !== undefined) return;
+  const key = envKey(env, name);
+  env[key ?? name] = value;
+}
+
+/**
+ * Child environment for the Windows PowerShell helper. A harness may start an MCP
+ * server with a filtered environment (Codex forwards a whitelist), and PowerShell then
+ * has no SystemRoot/ComSpec/temp directory to work with. Only missing values are
+ * filled, from the inherited ones where possible; a present value is never overridden.
+ */
+function windowsProcessEnv(env) {
+  const child = { ...env };
+  const systemRoot = envValue(child, ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR']) ?? DEFAULT_SYSTEM_ROOT;
+  fillEnvValue(child, 'SystemRoot', systemRoot);
+  fillEnvValue(child, 'windir', systemRoot);
+  fillEnvValue(child, 'ComSpec', path.win32.join(systemRoot, 'System32', 'cmd.exe'));
+  const tempDir = os.tmpdir();
+  fillEnvValue(child, 'TEMP', tempDir);
+  fillEnvValue(child, 'TMP', tempDir);
+  const userProfile = os.homedir();
+  fillEnvValue(child, 'USERPROFILE', userProfile);
+  fillEnvValue(child, 'LOCALAPPDATA', path.win32.join(userProfile, 'AppData', 'Local'));
+  fillEnvValue(child, 'APPDATA', path.win32.join(userProfile, 'AppData', 'Roaming'));
+  fillEnvValue(child, 'PATHEXT', WINDOWS_PATHEXT);
+  return { env: child, systemRoot };
+}
+
 /**
  * Snapshot of the OS process table as Map<pid, {ppid, createdAt|null}>.
  * Windows uses CIM through Windows PowerShell; POSIX uses ps. Throws on failure.
  */
-export function readProcessTable({ spawnSyncImpl = spawnSync, platform = process.platform } = {}) {
+export function readProcessTable({ spawnSyncImpl = spawnSync, platform = process.platform, env = process.env } = {}) {
   const table = new Map();
   if (platform === 'win32') {
+    const { env: childEnv, systemRoot } = windowsProcessEnv(env);
     const result = spawnSyncImpl(
-      'powershell.exe',
+      path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
-      { encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 32 * 1024 * 1024 },
+      { encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 32 * 1024 * 1024, env: childEnv },
     );
     if (result.status !== 0 || typeof result.stdout !== 'string') throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'cannot read the process table');
     const rows = JSON.parse(result.stdout);
