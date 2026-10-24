@@ -1,0 +1,10 @@
+{
+  "deployRoot": "D:/AgentBridge/agent-bridge",
+  "nodePath": "C:/Program Files/nodejs/node.exe",
+  "bridgeUrl": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
+  "codexPluginDir": "C:/Users/YOU/.agents/plugins/plugins/agent-bridge",
+  "codexExecutable": "C:/Users/YOU/AppData/Local/OpenAI/Codex/bin/*/codex.exe",
+  "codexPluginId": "agent-bridge@personal",
+  "claudeExecutable": "C:/Users/YOU/AppData/Roaming/Claude/claude-code/*/*/claude.exe",
+  "claudePluginId": "agent-bridge@agent-bridge-local"
+}
