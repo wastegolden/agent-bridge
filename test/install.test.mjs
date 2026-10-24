@@ -93,7 +93,7 @@ const DEFAULT_SOURCE = {
   'skills/dsh-project-execution/SKILL.md': '---\nname: dsh-project-execution\n---\n\n# skill\n',
   'evidence/packaging-worker.md': 'evidence kept in the package\n',
   'evidence/raw/host-dump.txt': 'excluded raw evidence\n',
-  '.git': 'gitdir: E:/AgentWorkspace/codex/dsh-codex-bridge/.git/worktrees/packaging\n',
+  '.git': 'gitdir: D:/projects/agent-bridge/.git/worktrees/packaging\n',
   '.runtime/state.json': '{}\n',
   '.worktrees/other/file.txt': 'other worktree\n',
 };

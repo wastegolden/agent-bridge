@@ -30,7 +30,7 @@ function makePacket(overrides = {}) {
     projectId: 'dsh-codex-bridge',
     title: 'Add bounded model routing tests',
     objective: 'Add deterministic tests for the model routing module and report the result.',
-    cwd: 'E:/AgentWorkspace/codex/dsh-codex-bridge-worktrees/models',
+    cwd: 'D:/projects/agent-bridge-worktrees/models',
     role: 'implement',
     acceptance: [
       'test/models.test.mjs passes with node --test',

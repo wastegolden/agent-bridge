@@ -429,7 +429,13 @@ test('model failures, cancellation and timeouts become terminal only after the p
 
     const sleeping = await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'consult', prompt: 'SLEEP', cwd: work, waitMs: 0 });
     assert.equal(sleeping.job.status, 'running');
-    const ledger = await readdir(path.join(config.stateDir, 'active'));
+    // The ledger entry is written asynchronously after spawn (settle() awaits it), so a
+    // loaded machine can answer peer_ask before the file exists; wait for it briefly.
+    let ledger = [];
+    for (const deadline = Date.now() + 5_000; Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 25))) {
+      ledger = await readdir(path.join(config.stateDir, 'active')).catch(() => []);
+      if (ledger.length > 0) break;
+    }
     assert.deepEqual(ledger, [`${sleeping.job.pid}.json`], 'the running child is in the lineage ledger');
     const cancelled = await rpc(server, 'peer_cancel', { jobId: sleeping.job.jobId });
     assert.equal(cancelled.cancelRequested, true);
