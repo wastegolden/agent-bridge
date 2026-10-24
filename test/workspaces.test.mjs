@@ -32,7 +32,10 @@ import { WorkspaceManager } from '../src/workspaces.mjs';
 
 const CODES = WorkspaceManager.ERROR_CODES;
 const NODE = process.execPath;
-const TMP_BASE = mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-suite-'));
+// Canonical fixtures: the workspace manager fences and reports canonical paths
+// (`realpathSync.native`), which also expands Windows 8.3 short names, so every temp
+// directory the assertions compare against is created through the same canonicalization.
+const TMP_BASE = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-suite-')));
 const CAPTURES = path.join(TMP_BASE, 'captures');
 mkdirSync(CAPTURES, { recursive: true });
 
@@ -146,7 +149,7 @@ function writeRepoFile(directory, relative, content) {
 }
 
 function makeRepo(files = { 'a.txt': 'base\n' }) {
-  const directory = track(mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-repo-')));
+  const directory = realpathSync.native(track(mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-repo-'))));
   git(['init', '-q', '-b', 'main', directory]);
   git(['-C', directory, 'config', 'user.name', 'Test Worker']);
   git(['-C', directory, 'config', 'user.email', 'test@local']);
@@ -154,11 +157,11 @@ function makeRepo(files = { 'a.txt': 'base\n' }) {
   for (const [relative, content] of Object.entries(files)) writeRepoFile(directory, relative, content);
   git(['-C', directory, 'add', '-A']);
   git(['-C', directory, 'commit', '-q', '-m', 'base']);
-  return { dir: directory, top: realpathSync(directory) };
+  return { dir: directory, top: realpathSync.native(directory) };
 }
 
 function makeRoot() {
-  return realpathSync(track(mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-root-'))));
+  return realpathSync.native(track(mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-root-'))));
 }
 
 function manager(root, options = {}) {

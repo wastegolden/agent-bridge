@@ -37,7 +37,7 @@
 
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { TERMINAL, digest, fail, isWithin } from './contracts.mjs'
+import { TERMINAL, digest, fail, isWithin, resolvedPath } from './contracts.mjs'
 
 export const PROJECT_SCHEMA_VERSION = 1
 export const PROJECT_TERMINAL = new Set(['completed', 'failed', 'cancelled'])
@@ -493,7 +493,15 @@ export function attenuateWorkerRequest(grant, request, context = {}) {
     const out = []
     for (const root of requested) {
       if (!path.isAbsolute(root)) throw projectError('project/invalid-request', `${field} entries must be absolute paths`, { field })
-      const resolved = path.resolve(root)
+      // A worker may name an envelope root through another spelling (8.3 short name,
+      // junction or symlink alias). Canonicalize it BEFORE the containment check, so the
+      // fence compares real locations and the worker receives the canonical root.
+      let resolved
+      try {
+        resolved = resolvedPath(root)
+      } catch {
+        throw projectError('project/invalid-request', `${field} entry "${root}" cannot be resolved`, { field, root })
+      }
       if (!insideAny(allowed, resolved)) {
         throw projectError('project/grant-widened', `worker requested ${field} entry "${root}" outside the project worker envelope`, { field, root: resolved })
       }

@@ -860,6 +860,39 @@ test('the packet contract refuses reserveSlots below one and read-only roles att
   { code: 'project/workspace-required' })
 })
 
+test('a worker request that names envelope roots through a junction/symlink alias is accepted and canonicalized', async (t) => {
+  const env = makeEnv()
+  t.after(() => env.store.close())
+  const aliasBase = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-longtask-alias-'))
+  const alias = path.join(aliasBase, 'repo-alias')
+  try {
+    fs.symlinkSync(env.repository, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const canonical = fs.realpathSync.native(env.repository)
+    // The request below spells the SAME envelope directory differently (a junction here,
+    // an 8.3 short name or symlink on another machine): the containment check must compare
+    // canonical locations, not the spelling the supervisor happened to use.
+    assert.notEqual(alias, canonical)
+    const task = await env.service.submitProject(projectPacket(env.repository), env.projectConfig)
+    const created = env.runtime.workerCreate({
+      taskId: task.id,
+      args: {
+        workerKey: 'alias-writer',
+        objective: 'write through the envelope alias',
+        role: 'implement',
+        tools: ['read', 'write'],
+        readRoots: [alias],
+        writeRoots: [alias]
+      }
+    })
+    assert.equal(created.state, 'queued')
+    const declared = env.store.get(task.id).project.workers.find((worker) => worker.workerKey === 'alias-writer')
+    assert.deepEqual(declared.readRoots, [canonical], 'an aliased readRoot is accepted and attenuated to the canonical root')
+    assert.deepEqual(declared.writeRoots, [canonical], 'an aliased writeRoot is accepted and attenuated to the canonical root')
+  } finally {
+    fs.rmSync(aliasBase, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
+})
+
 test('the callback summary stays bounded and the project status tool reports honestly', async (t) => {
   const env = makeEnv()
   t.after(() => env.store.close())
