@@ -1,15 +1,10 @@
 {
   "mcpServers": {
     "dsh_project": {
-      "command": "node",
-      "args": [
-        "./bin/bridge.mjs"
-      ],
+      "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
+      "bearer_token_env_var": "DSH_MCP_TOKEN",
       "tool_timeout_sec": 75,
-      "default_tools_approval_mode": "approve",
-      "env": {
-        "DSH_BRIDGE_URL": "http://127.0.0.1:3080/mcp/codex-bridge-v1"
-      }
+      "default_tools_approval_mode": "approve"
     },
     "agent_peer": {
       "command": "node",

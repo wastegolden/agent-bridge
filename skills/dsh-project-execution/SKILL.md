@@ -267,7 +267,7 @@ The same `project` block gains bounded recurrence only when the host sets
   cancellation and cleanup gates, and a host restart never auto-resumes.
 
 Details: [docs/recurrent-supervisor.md](../../docs/recurrent-supervisor.md) and
-[docs/release-1.3.0.md](../../docs/release-1.3.0.md). All DSH development stays on
+[docs/history/release-1.3.0.md](../../docs/history/release-1.3.0.md). All DSH development stays on
 `deepseek-official/deepseek-flash`; no other route is selected or substituted.
 
 ## Invariants

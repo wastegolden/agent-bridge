@@ -1,3 +1,11 @@
+# 1.6.0 — first public release (2026-10-24)
+
+- MIT license; package renamed `agent-bridge` (the DSH host package keeps its install name `@local/dsh-codex-bridge-v1`, persisted ids are unchanged).
+- Install from GitHub: `.claude-plugin/marketplace.json` makes the repository a Claude Code marketplace (`claude plugin marketplace add <owner>/agent-bridge`, then `claude plugin install agent-bridge@agent-bridge`).
+- `scripts/deploy-local.mjs` also deploys from an extracted package or clone without git history and does a first install: it creates the Claude marketplace, `config/agent-peer.json`, the Codex plugin's `.mcp.json` and the Codex personal-marketplace entry only when missing, never overwriting machine files; `scripts/deploy.example.json` is the config template.
+- The Codex MCP template `.codex-mcp.json` connects `dsh_project` over HTTP (`bearer_token_env_var: DSH_MCP_TOKEN`), like the Claude manifest; the stdio carrier `bin/bridge.mjs` stays available.
+- Tests run in a clean checkout: `@deepseek-ai/dsh-llm` is a devDependency, CI runs on Windows + Node 24, a lineage-ledger test no longer races the asynchronous ledger write, and machine-specific example paths were neutralized. Old release notes moved to `docs/history/`.
+- Runtime behaviour is unchanged from 1.5.1; the DSH host bridge still reports 1.5.0.
 # 1.5.1 — Claude Code connects without a global node (2026-10-09)
 
 - Symptom: in the Claude desktop app both `dsh_project` and `agent_peer` closed at start (`'node' is not recognized…`, CONNECTION_CLOSED). Claude Code ran the 1.4.0 copy it had cached on 2026-10-07: its manifest still defaulted `node_path` to the literal `node`, and the root `.mcp.json` — the Codex template, `node ./bin/*.mjs` with `AGENT_BRIDGE_SELF: codex` — is also read by Claude Code. The desktop app has no node on its PATH.

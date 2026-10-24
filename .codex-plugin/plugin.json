@@ -1,16 +1,16 @@
 {
   "name": "agent-bridge",
-  "version": "1.5.1+codex.20261009.dsh020",
+  "version": "1.6.0+codex.20261024.dsh020",
   "description": "Bounded parallel DSH development plus cross-harness consult, review and delegation with Claude Code, under one root controller per task",
   "author": {
-    "name": "Local developer"
+    "name": "agent-bridge contributors"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Bridge (DSH · Codex · Claude Code)",
     "shortDescription": "Delegate bounded work to DSH and consult or cross-review with Claude Code.",
     "longDescription": "Coordinate isolated coding, review and integration tasks through DSH with explicit scope, durable results and controlled cleanup; ask Claude Code for independent review, a second opinion or a delegated sub-project without delegation loops.",
-    "developerName": "Local developer",
+    "developerName": "agent-bridge contributors",
     "category": "Productivity",
     "capabilities": [],
     "defaultPrompt": "Plan this development task, define interfaces, delegate bounded implementation to DSH and cross-check risky decisions with Claude Code."

@@ -1,0 +1,11 @@
+{
+  "name": "agent-bridge",
+  "owner": { "name": "agent-bridge contributors" },
+  "plugins": [
+    {
+      "name": "agent-bridge",
+      "source": "./",
+      "description": "DSH bridge tools plus cross-harness consult, review and delegation between Claude Code and Codex; one root controller per task, no delegation loops."
+    }
+  ]
+}
