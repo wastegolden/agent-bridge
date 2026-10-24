@@ -1,3 +1,9 @@
+# 1.6.1 — CI on Windows runners with 8.3 TEMP paths (2026-10-24)
+
+- Fix: a long-task worker that named an envelope directory through another spelling (Windows 8.3 short name, junction or symlink) was refused as `project/grant-widened`. Worker-requested `readRoots`/`writeRoots` are now canonicalized with `resolvedPath()` (realpath of the nearest existing ancestor) before the envelope check, the same canonicalization the packet applies to the envelope, and are stored canonical; an unresolvable root is `project/invalid-request`. Regression test with a junction/symlink alias. Found because GitHub Actions' TEMP is `C:\Users\RUNNER~1\...` (24 of the 32 CI failures).
+- Tests: `test/workspaces.test.mjs` fixtures use `realpathSync.native`, which expands 8.3 names like the workspace manager (7 CI failures).
+- The lineage process-table read asks CIM only for `ProcessId,ParentProcessId,CreationDate`, and CI warms up WMI before the tests (one cold-WMI timeout).
+- Implemented by a DSH Flash worker through the bridge (task 3dec7318); 675/675 locally with a normal TEMP and with TEMP behind a junction.
 # 1.6.0 — first public release (2026-10-24)
 
 - MIT license; package renamed `agent-bridge` (the DSH host package keeps its install name `@local/dsh-codex-bridge-v1`, persisted ids are unchanged).

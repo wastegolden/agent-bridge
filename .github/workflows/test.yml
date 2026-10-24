@@ -20,5 +20,10 @@ jobs:
           node-version: 24
       - name: Install dev dependencies (DSH LLM seam used by the adapter tests)
         run: npm install --no-audit --no-fund
+      # The lineage ledger reads the process table through CIM; a cold WMI on a fresh
+      # runner can take longer than the 20 s read timeout and fail a root claim closed.
+      - name: Warm up WMI
+        shell: pwsh
+        run: Get-CimInstance Win32_Process -Property ProcessId | Out-Null
       - name: Test
         run: npm test
