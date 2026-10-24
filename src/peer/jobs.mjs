@@ -472,6 +472,13 @@ export function createPeerJobs({
         }
         entry.waiters.add(done);
       });
+    } else if (entry && waitMs > 0) {
+      // settle() has started but not finished (result, persistence and the lineage-ledger
+      // clear are still being awaited): wait for it, so a caller never observes the
+      // terminal status of a job whose ledger entry still exists.
+      let timer;
+      await Promise.race([entry.settledPromise, new Promise((resolve) => { timer = setTimeout(resolve, waitMs); })]);
+      clearTimeout(timer);
     }
     return snapshot(await readRecord(jobId));
   }
