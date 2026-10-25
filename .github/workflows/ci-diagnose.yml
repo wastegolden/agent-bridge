@@ -1,0 +1,25 @@
+name: ci-diagnose
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci-diagnose]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Warm up Windows PowerShell and WMI
+        continue-on-error: true
+        shell: powershell
+        run: Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress | Out-Null
+      - name: Diagnose filtered-environment process reads
+        run: node scripts/ci-diagnose.mjs

@@ -18,11 +18,9 @@
 // A stale entry can only make a chain longer (more refusals), never shorter, so pid
 // reuse fails safe. Ancestry lookup errors are reported; they never invent a chain.
 //
-// On Windows the process table is read with an absolute Windows PowerShell path and a
-// completed child environment: an MCP server can be started with a filtered environment
-// (observed on CI: the same query timed out under a harness-provided PATH/SystemRoot-only
-// environment), so neither the lookup nor the child's settings may depend on what the
-// server happened to inherit.
+// On Windows the helper uses an absolute PowerShell path, fill-only environment
+// defaults, inbox modules and no stdin. A harness can filter its MCP environment
+// and start the server without a console.
 
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -63,6 +61,15 @@ function parseWmiDate(value) {
 
 const WINDOWS_PATHEXT = '.COM;.EXE;.BAT;.CMD';
 const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
+const WINDOWS_QUERY = 'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress';
+const WINDOWS_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$ProgressPreference = 'SilentlyContinue'",
+  "$PSModuleAutoLoadingPreference = 'None'",
+  "Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1')",
+  "Import-Module ($PSHOME + '\\Modules\\CimCmdlets\\CimCmdlets.psd1')",
+  WINDOWS_QUERY,
+].join('; ');
 
 /** The actual key of `name` in `env`; Windows environment names are case-insensitive. */
 function envKey(env, name) {
@@ -81,18 +88,18 @@ function envValue(env, names) {
   return undefined;
 }
 
-/** Fill a missing (absent or empty) variable without ever adding a second case variant. */
+/** Fill an absent variable without changing a caller's value or adding a case variant. */
 function fillEnvValue(env, name, value) {
-  if (envValue(env, [name]) !== undefined) return;
   const key = envKey(env, name);
+  if (key !== null && typeof env[key] === 'string') return;
   env[key ?? name] = value;
 }
 
 /**
  * Child environment for the Windows PowerShell helper. A harness may start an MCP
  * server with a filtered environment (Codex forwards a whitelist), and PowerShell then
- * has no SystemRoot/ComSpec/temp directory to work with. Only missing values are
- * filled, from the inherited ones where possible; a present value is never overridden.
+ * has no SystemRoot/ComSpec/temp directory or module search path to work with. Only
+ * missing values are filled; a present value (including empty) is never overridden.
  */
 function windowsProcessEnv(env) {
   const child = { ...env };
@@ -100,14 +107,35 @@ function windowsProcessEnv(env) {
   fillEnvValue(child, 'SystemRoot', systemRoot);
   fillEnvValue(child, 'windir', systemRoot);
   fillEnvValue(child, 'ComSpec', path.win32.join(systemRoot, 'System32', 'cmd.exe'));
-  const tempDir = os.tmpdir();
+  const tempDir = envValue(child, ['TEMP', 'TMP']) ?? os.tmpdir();
   fillEnvValue(child, 'TEMP', tempDir);
   fillEnvValue(child, 'TMP', tempDir);
-  const userProfile = os.homedir();
+  const userProfile = envValue(child, ['USERPROFILE']) ?? os.homedir();
   fillEnvValue(child, 'USERPROFILE', userProfile);
   fillEnvValue(child, 'LOCALAPPDATA', path.win32.join(userProfile, 'AppData', 'Local'));
   fillEnvValue(child, 'APPDATA', path.win32.join(userProfile, 'AppData', 'Roaming'));
   fillEnvValue(child, 'PATHEXT', WINDOWS_PATHEXT);
+  const drive = path.win32.parse(systemRoot).root;
+  const programFiles = envValue(child, ['ProgramW6432', 'ProgramFiles']) ?? path.win32.join(drive, 'Program Files');
+  const programData = envValue(child, ['ProgramData', 'ALLUSERSPROFILE']) ?? path.win32.join(drive, 'ProgramData');
+  fillEnvValue(child, 'ProgramFiles', programFiles);
+  fillEnvValue(child, 'ProgramW6432', programFiles);
+  fillEnvValue(child, 'CommonProgramFiles', path.win32.join(programFiles, 'Common Files'));
+  fillEnvValue(child, 'CommonProgramW6432', path.win32.join(programFiles, 'Common Files'));
+  fillEnvValue(child, 'ProgramData', programData);
+  fillEnvValue(child, 'ALLUSERSPROFILE', programData);
+  fillEnvValue(child, 'HOMEDRIVE', path.win32.parse(userProfile).root.replace(/\\$/, ''));
+  fillEnvValue(child, 'HOMEPATH', userProfile.slice(path.win32.parse(userProfile).root.length - 1));
+  if (envKey(child, 'USERNAME') === null) {
+    try { fillEnvValue(child, 'USERNAME', os.userInfo().username); } catch {}
+  }
+  fillEnvValue(child, 'COMPUTERNAME', os.hostname());
+  fillEnvValue(child, 'OS', 'Windows_NT');
+  const machine = os.machine().toLowerCase();
+  fillEnvValue(child, 'PROCESSOR_ARCHITECTURE', { x86_64: 'AMD64', amd64: 'AMD64', aarch64: 'ARM64', arm64: 'ARM64' }[machine] ?? 'x86');
+  fillEnvValue(child, 'NUMBER_OF_PROCESSORS', String(os.cpus().length || 1));
+  // The query needs only inbox modules; avoid default discovery of user/network paths.
+  fillEnvValue(child, 'PSModulePath', path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'));
   return { env: child, systemRoot };
 }
 
@@ -121,14 +149,24 @@ export function readProcessTable({ spawnSyncImpl = spawnSync, platform = process
     const { env: childEnv, systemRoot } = windowsProcessEnv(env);
     const result = spawnSyncImpl(
       path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
-      { encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 32 * 1024 * 1024, env: childEnv },
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'Text', '-OutputFormat', 'Text', '-Command', WINDOWS_SCRIPT],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000, maxBuffer: 32 * 1024 * 1024, env: childEnv },
     );
-    if (result.status !== 0 || typeof result.stdout !== 'string') throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'cannot read the process table');
-    const rows = JSON.parse(result.stdout);
-    for (const row of Array.isArray(rows) ? rows : [rows]) {
-      if (Number.isInteger(row?.ProcessId)) table.set(row.ProcessId, { ppid: row.ParentProcessId ?? null, createdAt: parseWmiDate(row.CreationDate) });
+    if (result.error || result.status !== 0 || typeof result.stdout !== 'string') throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'cannot read the process table');
+    let rows;
+    try {
+      rows = JSON.parse(result.stdout);
+    } catch {
+      throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'invalid process table');
     }
+    for (const row of Array.isArray(rows) ? rows : [rows]) {
+      const createdAt = parseWmiDate(row?.CreationDate);
+      if (!Number.isInteger(row?.ProcessId) || row.ProcessId < 0 || !Number.isInteger(row.ParentProcessId) || row.ParentProcessId < 0) {
+        throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'incomplete process table');
+      }
+      table.set(row.ProcessId, { ppid: row.ParentProcessId, createdAt });
+    }
+    if (table.size === 0) throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'empty process table');
     return table;
   }
   const result = spawnSyncImpl('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 20_000 });
