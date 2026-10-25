@@ -20,7 +20,12 @@
 //
 // On Windows the helper uses an absolute PowerShell path, fill-only environment
 // defaults, inbox modules and no stdin. A harness can filter its MCP environment
-// and start the server without a console.
+// and start the server without a console. Measured on a GitHub windows-latest runner
+// (scripts/ci-diagnose.mjs): without the inherited PSModulePath, command discovery
+// for Get-CimInstance through module auto-loading hung past the 20 s timeout (also
+// with an inbox-only PSModulePath, and no other variable or stdin/console setting
+// helped); importing the inbox modules explicitly with auto-loading off read the
+// table in ~0.4 s. The remaining environment defaults are defensive.
 
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
