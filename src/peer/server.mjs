@@ -32,7 +32,7 @@ import path from 'node:path';
 
 import { createBridgeClient } from './bridge-client.mjs';
 import { ENV_KEYS, PEER_MODES, PEER_TARGETS, PeerPolicyError, buildPeerPreamble, formatChain, planPeerCall, readChainContext } from './chain.mjs';
-import { MODEL_RE, SESSION_ID_RE, buildInvocation, childEnvironment } from './cli.mjs';
+import { EFFORT_RE, MODEL_RE, SESSION_ID_RE, buildInvocation, childEnvironment, effortChoices } from './cli.mjs';
 import { CLOSEOUT_OUTCOMES, closeoutRootTask } from './closeout.mjs';
 import { createCodexThreadClient } from './codex-threads.mjs';
 import { createPeerJobs } from './jobs.mjs';
@@ -94,7 +94,8 @@ export function peerTools(limits) {
         prompt: str('Complete, self-contained request. The peer sees nothing of this conversation. For review, include the exact material or file paths and what to judge; do not reveal which model produced it.', { minLength: 1, maxLength: limits.maxPromptChars }),
         cwd: str('Absolute existing working directory for the peer. When continuing a session it must equal that session\'s directory.', { pattern: ABSOLUTE_PATH_PATTERN }),
         sessionId: str('Continue a session that an earlier peer job of the SAME target and the SAME root task created (from that job\'s sessionId). Other sessions are refused.', { pattern: SESSION_ID_RE.source }),
-        model: str('Optional explicit model for the peer CLI. Omitted uses the configured or CLI default.', { pattern: MODEL_RE.source }),
+        model: str('Optional explicit model for the peer CLI. Omitted uses the configured default; with neither, nothing is passed and the CLI decides.', { pattern: MODEL_RE.source }),
+        reasoningEffort: str('Optional reasoning effort for THIS run (new or continued session). Overrides peers.<target>.reasoningEffort / peers.<target>.effort; omitted uses the configured default, and with neither nothing is passed. Allowed values are peers.<target>.reasoningEfforts in peer_capabilities (call it before choosing).', { pattern: EFFORT_RE.source }),
         addDirs: { type: 'array', items: { type: 'string', pattern: ABSOLUTE_PATH_PATTERN }, description: 'delegate only, new sessions only: extra absolute writable directories.' },
         title: str('Short label for job listings.', { maxLength: 200 }),
         timeoutMs: int('Wall-clock limit for the peer process.', { minimum: 10_000, maximum: limits.maxTimeoutMs }),
@@ -317,7 +318,17 @@ export function createPeerServer({
     const { context, error: contextError, source } = await resolveContext();
     const peers = {};
     for (const target of PEER_TARGETS) {
-      const entry = { configured: Boolean(config?.peers?.[target]), enabled: config?.peers?.[target]?.enabled === true, modes: {} };
+      const peer = config?.peers?.[target] ?? null;
+      const entry = {
+        configured: Boolean(peer),
+        enabled: peer?.enabled === true,
+        // What a plain peer_ask would pass when the call names neither model nor effort.
+        defaultModel: peer?.model ?? null,
+        defaultReasoningEffort: peer ? (target === 'codex' ? (peer.reasoningEffort ?? null) : (peer.effort ?? null)) : null,
+        // The per-call values a reasoningEffort argument may name right now.
+        reasoningEfforts: peer ? effortChoices(target, peer) : [],
+        modes: {},
+      };
       for (const mode of PEER_MODES) {
         if (!context) {
           entry.modes[mode] = { allowed: false, code: contextError?.code ?? 'PEER_SELF_UNKNOWN' };
@@ -396,7 +407,7 @@ export function createPeerServer({
     if (!info?.isDirectory?.()) throw new PeerPolicyError('PEER_ARGS_INVALID', 'cwd must be an existing directory', { field: 'cwd' });
     const allocation = jobManager.allocate();
     const invocation = buildInvocation(
-      { target: args.target, mode: args.mode, cwd: args.cwd, sessionId: args.sessionId ?? null, model: args.model ?? null, addDirs: args.addDirs ?? [], lastMessageFile: allocation.lastMessageFile },
+      { target: args.target, mode: args.mode, cwd: args.cwd, sessionId: args.sessionId ?? null, model: args.model ?? null, reasoningEffort: args.reasoningEffort ?? null, addDirs: args.addDirs ?? [], lastMessageFile: allocation.lastMessageFile },
       peer,
     );
     const prompt = `${buildPeerPreamble(plan)}\n\n${args.prompt}`;
@@ -410,6 +421,11 @@ export function createPeerServer({
       title: args.title ?? null,
       cwd: invocation.cwd,
       sessionIdRequested: args.sessionId ?? null,
+      // What buildInvocation actually passed, and where it came from.
+      model: invocation.model,
+      modelSource: invocation.modelSource,
+      reasoningEffort: invocation.reasoningEffort,
+      effortSource: invocation.effortSource,
     });
     const waitMs = args.waitMs ?? Math.min(limits.maxWaitMs, 55_000);
     return waitMs > 0 ? jobManager.wait(job.jobId, waitMs) : job;

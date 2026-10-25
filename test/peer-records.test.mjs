@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  RECORD_MISSING,
   appendIndexEvent,
   computeEligibleAt,
   ensureGitExclude,
@@ -471,6 +472,38 @@ test('renderRecord escapes pipes and newlines inside the findings table', () => 
   assert.ok(markdown.includes('| F-1 | codex、claude-code | refuted | a\\|b | line1<br>line2 |'));
   // The raw newline never reaches the table row.
   assert.equal(markdown.includes('| a|b |'), false);
+});
+
+test('renderRecord shows the peer model/effort line with its sources and marks an old job', () => {
+  const withModel = peerJobFixture();
+  withModel.job.model = 'gpt-5.1-codex';
+  withModel.job.modelSource = 'call';
+  withModel.job.reasoningEffort = 'xhigh';
+  withModel.job.effortSource = 'call';
+  const markdown = renderRecord(recordInput({ peerJobs: [withModel] }));
+  assert.ok(markdown.includes('- 模型: gpt-5.1-codex（call） · 思考强度: xhigh（call）'), markdown);
+
+  // Configuration-sourced defaults and a run that passed nothing are both explicit.
+  const configured = peerJobFixture();
+  configured.job.jobId = 'peer-1700000000001-abcdef02';
+  configured.job.model = 'gpt-5.1';
+  configured.job.modelSource = 'config';
+  configured.job.reasoningEffort = 'high';
+  configured.job.effortSource = 'config';
+  assert.ok(renderRecord(recordInput({ peerJobs: [configured] })).includes('- 模型: gpt-5.1（config） · 思考强度: high（config）'));
+
+  const cliDefault = peerJobFixture();
+  cliDefault.job.jobId = 'peer-1700000000002-abcdef03';
+  cliDefault.job.model = null;
+  cliDefault.job.modelSource = 'cli-default';
+  cliDefault.job.reasoningEffort = null;
+  cliDefault.job.effortSource = 'cli-default';
+  assert.ok(renderRecord(recordInput({ peerJobs: [cliDefault] })).includes('- 模型: CLI 默认（cli-default） · 思考强度: CLI 默认（cli-default）'));
+
+  // A job recorded before the fields existed keeps the missing-value marker.
+  const old = renderRecord(recordInput({ peerJobs: [peerJobFixture()] }));
+  assert.ok(old.includes(`- 模型: ${RECORD_MISSING} · 思考强度: ${RECORD_MISSING}`));
+  assert.ok(old.includes('- 会话: sess-peer-1\n- 模型:'), 'the line sits directly after the session line');
 });
 
 test('renderRecord renders missing data as （无） and keeps titles inside their fence', () => {

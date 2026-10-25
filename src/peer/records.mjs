@@ -416,6 +416,21 @@ function renderBridgeTask(task) {
   return lines.join('\n');
 }
 
+/**
+ * The model/effort line of one peer job: what was PASSED to the peer CLI and where it
+ * came from (call | config | cli-default). A job recorded before these fields existed
+ * has neither, and is rendered with the usual missing-value marker.
+ */
+function renderPeerModel(job) {
+  const known = job.model !== undefined || job.modelSource !== undefined
+    || job.reasoningEffort !== undefined || job.effortSource !== undefined;
+  if (!known) return `- 模型: ${RECORD_MISSING} · 思考强度: ${RECORD_MISSING}`;
+  const source = (value) => (typeof value === 'string' && value !== '' ? value : 'cli-default');
+  const model = job.model === undefined || job.model === null ? 'CLI 默认' : inline(job.model);
+  const effort = job.reasoningEffort === undefined || job.reasoningEffort === null ? 'CLI 默认' : inline(job.reasoningEffort);
+  return `- 模型: ${model}（${source(job.modelSource)}） · 思考强度: ${effort}（${source(job.effortSource)}）`;
+}
+
 function renderPeerJob(entry) {
   const job = isObject(entry.job) ? entry.job : {};
   const chain = Array.isArray(job.chain) ? job.chain.map((value) => text(value)).join(' > ') : text(job.chain);
@@ -427,6 +442,7 @@ function renderPeerJob(entry) {
     `- 状态: ${inline(job.status)}`,
     `- 链: ${chain === '' ? RECORD_MISSING : chain}`,
     `- 会话: ${inline(job.sessionId)}`,
+    renderPeerModel(job),
     `- 开始: ${isoOrText(job.startedAt)}`,
     `- 结束: ${isoOrText(job.endedAt)}`,
     `- 用量: ${usage === '' ? RECORD_MISSING : usage}`,

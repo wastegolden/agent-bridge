@@ -37,11 +37,17 @@ export const CLAUDE_READ_ONLY_ALLOWED = Object.freeze(['Read', 'Grep', 'Glob', '
 /** Built-ins that can change files, run commands or spawn agents: always denied when read-only. */
 export const CLAUDE_WRITE_TOOLS = Object.freeze(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Task', 'Agent']);
 export const CODEX_SANDBOXES = Object.freeze(['read-only', 'workspace-write']);
-export const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+export const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 /** Codex plugin selector `name@marketplace`, used to disable plugins for read-only runs. */
 export const CODEX_PLUGIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const CLAUDE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 export const CLAUDE_DELEGATE_MODES = Object.freeze(['acceptEdits', 'auto', 'dontAsk']);
+/**
+ * One reasoning-effort value. Deliberately narrow: the codex value is interpolated
+ * into `-c model_reasoning_effort="<E>"`, so no quote, space or shell metacharacter
+ * can survive this check.
+ */
+export const EFFORT_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$/;
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -83,10 +89,52 @@ function checkToolNames(list, field) {
 }
 
 /**
+ * The reasoning-effort values a target accepts: the configured
+ * `peers.<target>.efforts` list when it is set, otherwise the built-in list.
+ * Unknown targets have no list.
+ *
+ * @param {string} target 'codex' | 'claude-code'
+ * @param {object|null} peer normalized peer config (may be a partial `{ efforts }`)
+ * @returns {string[]}
+ */
+export function effortChoices(target, peer) {
+  const configured = peer?.efforts;
+  if (Array.isArray(configured) && configured.length > 0) return [...configured];
+  if (target === 'codex') return [...CODEX_EFFORTS];
+  if (target === 'claude-code') return [...CLAUDE_EFFORTS];
+  return [];
+}
+
+/**
+ * The reasoning effort actually passed to one CLI run: per-call argument >
+ * configured default > nothing (the CLI's own default). Only validated values can
+ * ever reach the argv.
+ */
+function resolveEffort(target, request, peer) {
+  const isCodex = target === 'codex';
+  const configured = isCodex ? (peer.reasoningEffort ?? null) : (peer.effort ?? null);
+  const field = isCodex ? 'reasoningEffort' : 'effort';
+  const choices = effortChoices(target, peer);
+  if (configured !== null && !choices.includes(configured)) {
+    throw new PeerPolicyError('PEER_CONFIG_INVALID', `invalid ${target} ${field}`, { field });
+  }
+  const requested = request.reasoningEffort ?? null;
+  if (requested === null) {
+    return { reasoningEffort: configured, effortSource: configured === null ? 'cli-default' : 'config' };
+  }
+  if (typeof requested !== 'string' || !EFFORT_RE.test(requested) || !choices.includes(requested)) {
+    throw new PeerPolicyError('PEER_ARGS_INVALID', `reasoningEffort must be one of ${choices.join(', ')}`, { field: 'reasoningEffort' });
+  }
+  return { reasoningEffort: requested, effortSource: 'call' };
+}
+
+/**
  * Build one CLI invocation.
- * @param {object} request - { target, mode, cwd, sessionId?, model?, addDirs?, lastMessageFile }
+ * @param {object} request - { target, mode, cwd, sessionId?, model?, reasoningEffort?, addDirs?, lastMessageFile }
  * @param {object} peer - normalized peer config for request.target (src/peer/config.mjs)
- * @returns {{command: string, args: string[], cwd: string, readOnly: boolean}}
+ * @returns {{command: string, args: string[], cwd: string, readOnly: boolean,
+ *   model: string|null, modelSource: 'call'|'config'|'cli-default',
+ *   reasoningEffort: string|null, effortSource: 'call'|'config'|'cli-default'}}
  */
 export function buildInvocation(request, peer) {
   const { target, mode } = request;
@@ -96,10 +144,14 @@ export function buildInvocation(request, peer) {
   if (sessionId !== null && (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId))) {
     throw new PeerPolicyError('PEER_ARGS_INVALID', 'sessionId is not a valid session identifier', { field: 'sessionId' });
   }
+  // Precedence for both model and effort: per-call argument > configured default >
+  // nothing (the CLI's own default). `model`/`reasoningEffort` are what was PASSED.
   const model = request.model ?? peer.model ?? null;
+  const modelSource = request.model != null ? 'call' : peer.model != null ? 'config' : 'cli-default';
   if (model !== null && (typeof model !== 'string' || !MODEL_RE.test(model))) {
     throw new PeerPolicyError('PEER_ARGS_INVALID', 'model is not a valid model identifier', { field: 'model' });
   }
+  let effort = { reasoningEffort: null, effortSource: 'cli-default' };
   const addDirs = (request.addDirs ?? []).map((dir, index) => assertAbsoluteDir(dir, `addDirs[${index}]`));
   if (readOnly && addDirs.length > 0) {
     throw new PeerPolicyError('PEER_ARGS_INVALID', 'addDirs grants extra writable roots and is only accepted for mode "delegate"', { field: 'addDirs' });
@@ -116,13 +168,13 @@ export function buildInvocation(request, peer) {
     if (typeof request.lastMessageFile !== 'string' || !path.isAbsolute(request.lastMessageFile)) {
       throw new PeerPolicyError('PEER_ARGS_INVALID', 'lastMessageFile must be an absolute path', { field: 'lastMessageFile' });
     }
-    if (peer.reasoningEffort != null && !CODEX_EFFORTS.includes(peer.reasoningEffort)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid codex reasoningEffort', { field: 'reasoningEffort' });
+    effort = resolveEffort(target, request, peer);
     if (peer.profile != null && !PROFILE_RE.test(peer.profile)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid codex profile', { field: 'profile' });
     const options = [
       '--json',
       '--skip-git-repo-check',
       ...(model ? ['-m', model] : []),
-      ...(peer.reasoningEffort ? ['-c', `model_reasoning_effort="${peer.reasoningEffort}"`] : []),
+      ...(effort.reasoningEffort ? ['-c', `model_reasoning_effort="${effort.reasoningEffort}"`] : []),
       ...(peer.profile ? ['-p', peer.profile] : []),
       ...(readOnly && peer.readOnlyIgnoreUserConfig === true ? ['--ignore-user-config'] : []),
       // MCP tools are outside the shell sandbox; plugins whose tools are pre-approved are
@@ -138,11 +190,11 @@ export function buildInvocation(request, peer) {
       // `exec resume` has no -s/-C: the sandbox is pinned by the LAST config override and
       // the working directory is the session's own (the server requires the same cwd).
       : ['exec', 'resume', ...options, '-c', `sandbox_mode="${sandbox}"`, sessionId, '-'];
-    return { command: peer.executable, args, cwd, readOnly };
+    return { command: peer.executable, args, cwd, readOnly, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
   }
 
   if (target === 'claude-code') {
-    if (peer.effort != null && !CLAUDE_EFFORTS.includes(peer.effort)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid claude effort', { field: 'effort' });
+    effort = resolveEffort(target, request, peer);
     if (peer.fallbackModel != null && !MODEL_RE.test(peer.fallbackModel)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid claude fallbackModel', { field: 'fallbackModel' });
     let permission;
     if (readOnly) {
@@ -172,13 +224,13 @@ export function buildInvocation(request, peer) {
       ...(readOnly ? ['--no-session-persistence'] : []),
       ...(sessionId !== null ? ['--resume', sessionId] : []),
       ...(model ? ['--model', model] : []),
-      ...(peer.effort ? ['--effort', peer.effort] : []),
+      ...(effort.reasoningEffort ? ['--effort', effort.reasoningEffort] : []),
       ...(peer.fallbackModel ? ['--fallback-model', peer.fallbackModel] : []),
       ...addDirs.flatMap((dir) => ['--add-dir', dir]),
       // Permission flags last; the variadic tool lists end the argv (the prompt is stdin).
       ...permission,
     ];
-    return { command: peer.executable, args, cwd, readOnly };
+    return { command: peer.executable, args, cwd, readOnly, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
   }
 
   throw new PeerPolicyError('PEER_UNKNOWN_TARGET', `no CLI adapter for "${target}"`, { field: 'target' });

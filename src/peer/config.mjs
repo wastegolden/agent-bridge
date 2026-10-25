@@ -29,7 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { isLocalBridgeUrl } from './bridge-client.mjs';
-import { CLAUDE_DELEGATE_MODES, CLAUDE_EFFORTS, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_EFFORTS, CODEX_PLUGIN_ID_RE, CODEX_SANDBOXES, MODEL_RE } from './cli.mjs';
+import { CLAUDE_DELEGATE_MODES, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_PLUGIN_ID_RE, CODEX_SANDBOXES, EFFORT_RE, MODEL_RE, effortChoices } from './cli.mjs';
 import { PEER_TARGETS, PeerPolicyError } from './chain.mjs';
 import { DEFAULT_DISPUTED_RETAIN_DAYS, DEFAULT_RECORD_DIR, DEFAULT_RETAIN_DAYS } from './records.mjs';
 
@@ -57,8 +57,8 @@ export const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
 
 const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits', 'records', 'bridge'];
 const PEER_KEYS = {
-  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins', 'threadSection', 'threadNamePrefix'],
-  'claude-code': ['executable', 'enabled', 'model', 'effort', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
+  codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'efforts', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins', 'threadSection', 'threadNamePrefix'],
+  'claude-code': ['executable', 'enabled', 'model', 'effort', 'efforts', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
 };
 const LIMIT_KEYS = Object.keys(DEFAULT_LIMITS);
 const RECORD_KEYS = ['enabled', 'dirName', 'retainDays', 'disputedRetainDays', 'sweepIntervalMinutes', 'claudeProjectsDir'];
@@ -103,6 +103,26 @@ function optionalModel(value, field) {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'string' || !MODEL_RE.test(value)) fail(`${field} is not a valid model identifier`, field);
   return value;
+}
+
+/**
+ * The optional `peers.<target>.efforts` list: 1..16 unique effort values. When absent
+ * the target keeps its built-in list (see effortChoices in src/peer/cli.mjs).
+ */
+function effortList(value, field) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) {
+    fail(`${field} must be an array of 1 to 16 effort values`, field);
+  }
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string' || !EFFORT_RE.test(item)) {
+      fail(`${field} must hold effort values matching ${EFFORT_RE.source}`, field);
+    }
+    if (seen.has(item)) fail(`${field} must not repeat an effort value`, field);
+    seen.add(item);
+  }
+  return Object.freeze([...value]);
 }
 
 function positiveInt(value, field) {
@@ -195,12 +215,14 @@ export function normalizePeerConfig(raw) {
       enabled,
       executable: absolute(value.executable, `peers.${name}.executable`),
       model: optionalModel(value.model, `peers.${name}.model`),
+      efforts: effortList(value.efforts, `peers.${name}.efforts`),
     };
     if (/\.(cmd|bat)$/i.test(peer.executable)) {
       fail(`peers.${name}.executable must be the real executable, not a .cmd/.bat shim (spawned without a shell)`, `peers.${name}.executable`);
     }
     if (name === 'codex') {
-      peer.reasoningEffort = optionalEnum(value.reasoningEffort, CODEX_EFFORTS, 'peers.codex.reasoningEffort');
+      // The configured default is validated against the allowed list the same run uses.
+      peer.reasoningEffort = optionalEnum(value.reasoningEffort, effortChoices(name, peer), 'peers.codex.reasoningEffort');
       peer.profile = value.profile === undefined || value.profile === null ? null : String(value.profile);
       if (peer.profile !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(peer.profile)) fail('peers.codex.profile is not a valid profile name', 'peers.codex.profile');
       peer.delegateSandbox = value.delegateSandbox ?? 'workspace-write';
@@ -219,7 +241,7 @@ export function normalizePeerConfig(raw) {
         ? DEFAULT_THREAD_NAME_PREFIX
         : boundedName(value.threadNamePrefix, MAX_THREAD_NAME_PREFIX_CHARS, 'peers.codex.threadNamePrefix');
     } else {
-      peer.effort = optionalEnum(value.effort, CLAUDE_EFFORTS, 'peers.claude-code.effort');
+      peer.effort = optionalEnum(value.effort, effortChoices(name, peer), 'peers.claude-code.effort');
       peer.fallbackModel = optionalModel(value.fallbackModel, 'peers.claude-code.fallbackModel');
       peer.readOnlyTools = stringList(value.readOnlyTools, 'peers.claude-code.readOnlyTools') ?? [...CLAUDE_READ_ONLY_TOOLS];
       if (peer.readOnlyTools.length === 0 || peer.readOnlyTools.some((tool) => !CLAUDE_READ_ONLY_ALLOWED.includes(tool))) {

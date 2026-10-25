@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { ENV_KEYS, PeerPolicyError, buildPeerPreamble, formatChain, parseChain, planPeerCall, readChainContext } from '../src/peer/chain.mjs';
-import { CLAUDE_WRITE_TOOLS, buildInvocation, childEnvironment, parseClaudeOutput, parseCodexOutput } from '../src/peer/cli.mjs';
+import { CLAUDE_EFFORTS, CLAUDE_WRITE_TOOLS, CODEX_EFFORTS, buildInvocation, childEnvironment, effortChoices, parseClaudeOutput, parseCodexOutput } from '../src/peer/cli.mjs';
 import { loadPeerConfig, normalizePeerConfig, resolveExecutablePattern } from '../src/peer/config.mjs';
 import { createPeerJobs, defaultKillTree } from '../src/peer/jobs.mjs';
 import { createPeerServer } from '../src/peer/server.mjs';
@@ -143,6 +143,91 @@ test('claude review exposes only read-only built-ins, no MCP, denies write tools
   assert.equal(delegate.args[delegate.args.indexOf('--resume') + 1], 'a73c13c2-5006-4731-b1d3-93a817b735bc');
 });
 
+test('per-call reasoningEffort beats the configured default for codex, also when resuming', () => {
+  const lastMessageFile = path.join(ABS, 'last.txt');
+  const codex = codexPeer(); // configured reasoningEffort: 'high'
+  const fromConfig = buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile }, codex);
+  assert.equal(fromConfig.reasoningEffort, 'high');
+  assert.equal(fromConfig.effortSource, 'config');
+  assert.equal(fromConfig.model, null);
+  assert.equal(fromConfig.modelSource, 'cli-default');
+  assert.ok(fromConfig.args.includes('model_reasoning_effort="high"'));
+
+  const fromCall = buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, reasoningEffort: 'ultra', model: 'gpt-5.1-codex' }, codex);
+  assert.equal(fromCall.reasoningEffort, 'ultra', 'ultra is part of the built-in codex list');
+  assert.equal(fromCall.effortSource, 'call');
+  assert.equal(fromCall.model, 'gpt-5.1-codex');
+  assert.equal(fromCall.modelSource, 'call');
+  assert.ok(fromCall.args.includes('model_reasoning_effort="ultra"'));
+  assert.deepEqual(fromCall.args.slice(fromCall.args.indexOf('-m'), fromCall.args.indexOf('-m') + 2), ['-m', 'gpt-5.1-codex']);
+
+  const resumed = buildInvocation({ target: 'codex', mode: 'consult', cwd: ABS, lastMessageFile, sessionId: '01a1119d-5fcc-7880-bfd6-0fb84f99c67f', reasoningEffort: 'xhigh' }, codex);
+  assert.deepEqual(resumed.args.slice(0, 2), ['exec', 'resume']);
+  assert.ok(resumed.args.includes('model_reasoning_effort="xhigh"'), 'a continued session takes the per-call effort too');
+  assert.equal(resumed.effortSource, 'call');
+
+  const bare = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe') } } }).peers.codex;
+  const bareInvocation = buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile }, bare);
+  assert.equal(bareInvocation.reasoningEffort, null);
+  assert.equal(bareInvocation.effortSource, 'cli-default');
+  assert.equal(bareInvocation.model, null);
+  assert.equal(bareInvocation.modelSource, 'cli-default');
+  assert.equal(bareInvocation.args.some((arg) => String(arg).startsWith('model_reasoning_effort=')), false, 'nothing is passed when neither is configured');
+  assert.equal(bareInvocation.args.includes('-m'), false);
+
+  // A configured efforts list replaces the built-in one for validation and for use.
+  const configured = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), efforts: ['fast', 'deep'] } } }).peers.codex;
+  assert.deepEqual(effortChoices('codex', configured), ['fast', 'deep']);
+  assert.ok(buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, reasoningEffort: 'deep' }, configured).args.includes('model_reasoning_effort="deep"'));
+  assert.throws(() => buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, reasoningEffort: 'xhigh' }, configured), { code: 'PEER_ARGS_INVALID' }, 'a built-in value outside the configured list is refused');
+  assert.throws(() => normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { codex: { executable: path.join(ABS, 'codex.exe'), efforts: ['fast'], reasoningEffort: 'xhigh' } } }), { code: 'PEER_CONFIG_INVALID' });
+
+  // No value can ever reach the -c string: quotes, spaces and upper case are refused.
+  for (const bad of ['xhigh"', 'high ', 'High', 'high"; rm -rf /', 'high\n']) {
+    assert.throws(() => buildInvocation({ target: 'codex', mode: 'review', cwd: ABS, lastMessageFile, reasoningEffort: bad }, codex), { code: 'PEER_ARGS_INVALID' }, JSON.stringify(bad));
+  }
+});
+
+test('effortChoices falls back to the built-in list and is empty for an unknown target', () => {
+  assert.deepEqual(effortChoices('codex', {}), [...CODEX_EFFORTS]);
+  assert.deepEqual(effortChoices('codex', { efforts: null }), [...CODEX_EFFORTS]);
+  assert.deepEqual(effortChoices('codex', { efforts: ['fast'] }), ['fast']);
+  assert.deepEqual(effortChoices('claude-code', {}), [...CLAUDE_EFFORTS]);
+  assert.deepEqual(effortChoices('unknown', {}), []);
+  assert.ok(CODEX_EFFORTS.includes('ultra'));
+});
+
+test('claude per-call effort and model override the configured default', () => {
+  const fromConfig = buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS }, claudePeer());
+  assert.equal(fromConfig.reasoningEffort, 'high');
+  assert.equal(fromConfig.effortSource, 'config');
+  assert.equal(fromConfig.args[fromConfig.args.indexOf('--effort') + 1], 'high');
+
+  const fromCall = buildInvocation({ target: 'claude-code', mode: 'delegate', cwd: ABS, reasoningEffort: 'max', model: 'claude-opus-4-1' }, claudePeer());
+  assert.equal(fromCall.reasoningEffort, 'max');
+  assert.equal(fromCall.effortSource, 'call');
+  assert.equal(fromCall.model, 'claude-opus-4-1');
+  assert.equal(fromCall.modelSource, 'call');
+  assert.equal(fromCall.args[fromCall.args.indexOf('--effort') + 1], 'max');
+  assert.equal(fromCall.args[fromCall.args.indexOf('--model') + 1], 'claude-opus-4-1');
+  assert.throws(() => buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS, reasoningEffort: 'minimal' }, claudePeer()), { code: 'PEER_ARGS_INVALID' }, 'minimal is codex-only');
+
+  const bare = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { 'claude-code': { executable: path.join(ABS, 'claude.exe') } } }).peers['claude-code'];
+  const bareInvocation = buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS }, bare);
+  assert.equal(bareInvocation.reasoningEffort, null);
+  assert.equal(bareInvocation.effortSource, 'cli-default');
+  assert.equal(bareInvocation.args.includes('--effort'), false, 'nothing is passed when neither is configured');
+
+  const custom = normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { 'claude-code': { executable: path.join(ABS, 'claude.exe'), efforts: ['quick', 'deep'], effort: 'quick' } } }).peers['claude-code'];
+  assert.deepEqual(effortChoices('claude-code', custom), ['quick', 'deep']);
+  const customInvocation = buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS }, custom);
+  assert.equal(customInvocation.reasoningEffort, 'quick');
+  assert.equal(customInvocation.effortSource, 'config');
+  assert.equal(customInvocation.args[customInvocation.args.indexOf('--effort') + 1], 'quick');
+  assert.throws(() => buildInvocation({ target: 'claude-code', mode: 'review', cwd: ABS, reasoningEffort: 'high' }, custom), { code: 'PEER_ARGS_INVALID' });
+  assert.throws(() => normalizePeerConfig({ schemaVersion: 1, stateDir: ABS, peers: { 'claude-code': { executable: path.join(ABS, 'claude.exe'), efforts: ['quick'], effort: 'high' } } }), { code: 'PEER_CONFIG_INVALID' });
+});
+
 test('the child environment drops caller identity and inherited chain in any letter case', () => {
   const env = childEnvironment(
     {
@@ -191,6 +276,15 @@ test('peer config refuses anything that could widen a read-only run', () => {
   refuse({ ...base, peers: { 'claude-code': { executable: exe('c.exe'), delegatePermissionMode: 'bypassPermissions' } } });
   refuse({ ...base, peers: { codex: { executable: exe('codex.cmd') } } });
   refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), reasoningEffort: 'insane' } } });
+  refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: [] } } });
+  refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: ['high', 'high'] } } });
+  refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: ['High'] } } });
+  refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: ['a b'] } } });
+  refuse({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: Array.from({ length: 17 }, (_, index) => `e${index}`) } } });
+  refuse({ ...base, peers: { 'claude-code': { executable: exe('c.exe'), efforts: ['quick'], effort: 'high' } } });
+  const custom = normalizePeerConfig({ ...base, peers: { codex: { executable: exe('codex.exe'), efforts: ['fast', 'deep'], reasoningEffort: 'deep' } } });
+  assert.deepEqual(custom.peers.codex.efforts, ['fast', 'deep']);
+  assert.equal(custom.peers.codex.reasoningEffort, 'deep');
   refuse({ ...base, peers: {}, limits: { maxTimeoutMs: 2_147_483_648, timeoutMs: 2_147_483_648 } });
 });
 
@@ -250,14 +344,14 @@ test('an executable pattern breaks an mtime tie with the greatest path', async (
 
 const fakeSpawn = (command, args, options) => spawn(process.execPath, [FAKE, ...args], options);
 
-async function withServer(env, fn, { maxConcurrent = 3, killTree, resolveLineage = null } = {}) {
+async function withServer(env, fn, { maxConcurrent = 3, killTree, resolveLineage = null, peers } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'agent-peer-'));
   const work = path.join(dir, 'work');
   await mkdir(work);
   const config = normalizePeerConfig({
     schemaVersion: 1,
     stateDir: path.join(dir, 'state'),
-    peers: { codex: { executable: path.join(dir, 'codex.exe') }, 'claude-code': { executable: path.join(dir, 'claude.exe') } },
+    peers: peers ?? { codex: { executable: path.join(dir, 'codex.exe') }, 'claude-code': { executable: path.join(dir, 'claude.exe') } },
   });
   const kills = [];
   const jobs = createPeerJobs({
@@ -338,6 +432,113 @@ test('root claude-code consults codex; the child inherits the chain, not the cal
     assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, sessionId: 'users-own-interactive-thread' })).error.code, 'PEER_SESSION_UNKNOWN');
     assert.equal((await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: os.tmpdir(), sessionId: asked.job.sessionId, rootTask: 'demo-1' })).error.code, 'PEER_ARGS_INVALID');
     assert.equal((await rpc(server, 'peer_list', {})).jobs.length, 2);
+  });
+});
+
+test('peer_capabilities reports default model/effort and the allowed effort list', async () => {
+  const exe = (name) => path.join(ABS, name);
+  await withServer({ AGENT_BRIDGE_SELF: 'claude-code' }, async ({ server }) => {
+    const caps = await rpc(server, 'peer_capabilities', {});
+    assert.equal(caps.peers.codex.defaultModel, 'gpt-5.1-codex');
+    assert.equal(caps.peers.codex.defaultReasoningEffort, 'xhigh');
+    assert.deepEqual(caps.peers.codex.reasoningEfforts, [...CODEX_EFFORTS]);
+    assert.equal(caps.peers['claude-code'].defaultModel, 'claude-sonnet-4-5');
+    assert.equal(caps.peers['claude-code'].defaultReasoningEffort, 'high');
+    assert.deepEqual(caps.peers['claude-code'].reasoningEfforts, ['low', 'high'], 'a configured efforts list replaces the built-in one');
+  }, { peers: { codex: { executable: exe('codex.exe'), model: 'gpt-5.1-codex', reasoningEffort: 'xhigh' }, 'claude-code': { executable: exe('claude.exe'), model: 'claude-sonnet-4-5', effort: 'high', efforts: ['low', 'high'] } } });
+
+  await withServer({ AGENT_BRIDGE_SELF: 'claude-code' }, async ({ server }) => {
+    const caps = await rpc(server, 'peer_capabilities', {});
+    assert.equal(caps.peers.codex.defaultModel, null);
+    assert.equal(caps.peers.codex.defaultReasoningEffort, null);
+    assert.deepEqual(caps.peers.codex.reasoningEfforts, [...CODEX_EFFORTS], 'the built-in list, ultra included');
+    assert.deepEqual(caps.peers['claude-code'].reasoningEfforts, [...CLAUDE_EFFORTS]);
+  });
+
+  await withServer({ AGENT_BRIDGE_SELF: 'claude-code' }, async ({ server }) => {
+    const caps = await rpc(server, 'peer_capabilities', {});
+    assert.equal(caps.peers['claude-code'].configured, false);
+    assert.equal(caps.peers['claude-code'].defaultModel, null);
+    assert.equal(caps.peers['claude-code'].defaultReasoningEffort, null);
+    assert.deepEqual(caps.peers['claude-code'].reasoningEfforts, [], 'an unconfigured peer advertises no effort values');
+  }, { peers: { codex: { executable: exe('codex.exe') } } });
+});
+
+test('peer job records carry the model and effort actually passed, on new and continued sessions', async () => {
+  await withServer({ AGENT_BRIDGE_SELF: 'claude-code' }, async ({ server, work, jobs }) => {
+    const first = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'What is 2+2?', cwd: work, model: 'gpt-5.1-codex', reasoningEffort: 'xhigh', rootTask: 'effort-1', waitMs: 20_000 });
+    assert.equal(first.job.status, 'completed', JSON.stringify(first));
+    assert.equal(first.job.model, 'gpt-5.1-codex');
+    assert.equal(first.job.modelSource, 'call');
+    assert.equal(first.job.reasoningEffort, 'xhigh');
+    assert.equal(first.job.effortSource, 'call');
+    const echo = JSON.parse((await rpc(server, 'peer_result', { jobId: first.job.jobId })).finalMessage.replace(/^CODEX-ECHO /, ''));
+    assert.equal(echo.argv[echo.argv.indexOf('-m') + 1], 'gpt-5.1-codex');
+    assert.ok(echo.argv.includes('model_reasoning_effort="xhigh"'));
+    const onDisk = JSON.parse(await readFile(path.join(jobs.jobsDir, first.job.jobId, 'job.json'), 'utf8'));
+    assert.equal(onDisk.model, 'gpt-5.1-codex');
+    assert.equal(onDisk.modelSource, 'call');
+    assert.equal(onDisk.reasoningEffort, 'xhigh');
+    assert.equal(onDisk.effortSource, 'call');
+
+    // The same session is continued with a different model and a different effort.
+    const second = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'And 3+3?', cwd: work, sessionId: first.job.sessionId, model: 'gpt-5.1', reasoningEffort: 'low', rootTask: 'effort-1', waitMs: 20_000 });
+    assert.equal(second.job.status, 'completed', JSON.stringify(second));
+    assert.equal(second.job.model, 'gpt-5.1');
+    assert.equal(second.job.modelSource, 'call');
+    assert.equal(second.job.reasoningEffort, 'low');
+    assert.equal(second.job.effortSource, 'call');
+    const resumedEcho = JSON.parse((await rpc(server, 'peer_result', { jobId: second.job.jobId })).finalMessage.replace(/^CODEX-ECHO /, ''));
+    assert.deepEqual(resumedEcho.argv.slice(0, 2), ['exec', 'resume']);
+    assert.equal(resumedEcho.argv[resumedEcho.argv.indexOf('-m') + 1], 'gpt-5.1');
+    assert.ok(resumedEcho.argv.includes('model_reasoning_effort="low"'));
+
+    // With neither configured nor passed, nothing is passed and the sources say so.
+    const third = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'plain', cwd: work, waitMs: 20_000 });
+    assert.equal(third.job.status, 'completed', JSON.stringify(third));
+    assert.equal(third.job.model, null);
+    assert.equal(third.job.modelSource, 'cli-default');
+    assert.equal(third.job.reasoningEffort, null);
+    assert.equal(third.job.effortSource, 'cli-default');
+
+    const rows = await rpc(server, 'peer_list', {});
+    const byId = Object.fromEntries(rows.jobs.map((row) => [row.jobId, row]));
+    assert.deepEqual([byId[first.job.jobId].model, byId[first.job.jobId].modelSource], ['gpt-5.1-codex', 'call']);
+    assert.deepEqual([byId[first.job.jobId].reasoningEffort, byId[first.job.jobId].effortSource], ['xhigh', 'call']);
+    assert.deepEqual([byId[second.job.jobId].model, byId[second.job.jobId].modelSource], ['gpt-5.1', 'call']);
+    assert.deepEqual([byId[second.job.jobId].reasoningEffort, byId[second.job.jobId].effortSource], ['low', 'call']);
+    assert.deepEqual([byId[third.job.jobId].model, byId[third.job.jobId].reasoningEffort], [null, null]);
+    assert.deepEqual([byId[third.job.jobId].modelSource, byId[third.job.jobId].effortSource], ['cli-default', 'cli-default']);
+
+    const invalid = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, reasoningEffort: 'extreme' });
+    assert.equal(invalid.error.code, 'PEER_ARGS_INVALID');
+    assert.equal(invalid.error.details.field, 'reasoningEffort');
+    const injected = await rpc(server, 'peer_ask', { target: 'codex', mode: 'consult', prompt: 'x', cwd: work, reasoningEffort: 'high"; rm -rf /' });
+    assert.equal(injected.protocolError.code, -32602, 'the advertised pattern refuses a quote before any CLI runs');
+    assert.equal((await rpc(server, 'peer_list', {})).jobs.length, 3, 'a refused effort starts no job');
+  });
+});
+
+test('a claude-code job passes and records per-call effort and model', async () => {
+  await withServer({ AGENT_BRIDGE_SELF: 'codex' }, async ({ server, work }) => {
+    const asked = await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'consult', prompt: 'hello', cwd: work, model: 'claude-sonnet-4-5', reasoningEffort: 'max', waitMs: 20_000 });
+    assert.equal(asked.job.status, 'completed', JSON.stringify(asked));
+    assert.equal(asked.job.model, 'claude-sonnet-4-5');
+    assert.equal(asked.job.modelSource, 'call');
+    assert.equal(asked.job.reasoningEffort, 'max');
+    assert.equal(asked.job.effortSource, 'call');
+    const result = await rpc(server, 'peer_result', { jobId: asked.job.jobId });
+    const echo = JSON.parse(result.finalMessage.replace(/^CLAUDE-ECHO /, ''));
+    assert.equal(echo.argv[echo.argv.indexOf('--model') + 1], 'claude-sonnet-4-5');
+    assert.equal(echo.argv[echo.argv.indexOf('--effort') + 1], 'max');
+    assert.equal(result.job.reasoningEffort, 'max');
+
+    const invalid = await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'consult', prompt: 'x', cwd: work, reasoningEffort: 'minimal' });
+    assert.equal(invalid.error.code, 'PEER_ARGS_INVALID');
+    assert.equal(invalid.error.details.field, 'reasoningEffort');
+    const injected = await rpc(server, 'peer_ask', { target: 'claude-code', mode: 'consult', prompt: 'x', cwd: work, reasoningEffort: 'max;rm' });
+    assert.equal(injected.protocolError.code, -32602);
+    assert.equal((await rpc(server, 'peer_list', {})).jobs.length, 1, 'a refused effort starts no job');
   });
 });
 

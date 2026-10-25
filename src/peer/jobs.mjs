@@ -332,9 +332,25 @@ export function createPeerJobs({
 
   /**
    * Start one peer process. `invocation` comes from buildInvocation, `plan` from
-   * planPeerCall, `env` is the already-shaped child environment.
+   * planPeerCall, `env` is the already-shaped child environment. The model/effort
+   * fields default to whatever the invocation actually passed to the CLI, so a caller
+   * that only has an invocation cannot lose them.
    */
-  async function start({ jobId, invocation, plan, prompt, env, timeoutMs, title = null, cwd, sessionIdRequested = null }) {
+  async function start({
+    jobId,
+    invocation,
+    plan,
+    prompt,
+    env,
+    timeoutMs,
+    title = null,
+    cwd,
+    sessionIdRequested = null,
+    model = invocation?.model ?? null,
+    modelSource = invocation?.modelSource ?? 'cli-default',
+    reasoningEffort = invocation?.reasoningEffort ?? null,
+    effortSource = invocation?.effortSource ?? 'cli-default',
+  }) {
     assertJobId(jobId);
     // Reserve synchronously: no await may run between the capacity check and the reservation.
     if (activeCount() + pendingStarts >= maxConcurrent) {
@@ -359,6 +375,11 @@ export function createPeerJobs({
         rootTask: plan.rootTask,
         cwd,
         readOnly: invocation.readOnly,
+        // What was PASSED to the CLI. null + 'cli-default' means nothing was passed.
+        model: model ?? null,
+        modelSource: modelSource ?? 'cli-default',
+        reasoningEffort: reasoningEffort ?? null,
+        effortSource: effortSource ?? 'cli-default',
         sessionIdRequested,
         sessionId: sessionIdRequested,
         status: 'running',
@@ -550,7 +571,21 @@ export function createPeerJobs({
     for (const jobId of (await listIds()).slice(0, Math.max(1, Math.min(limit, 200)))) {
       try {
         const record = await readRecord(jobId);
-        jobs.push({ jobId: record.jobId, target: record.target, mode: record.mode, status: record.status, title: record.title, startedAt: record.startedAt, endedAt: record.endedAt, sessionId: record.sessionId, chain: record.chain });
+        jobs.push({
+          jobId: record.jobId,
+          target: record.target,
+          mode: record.mode,
+          status: record.status,
+          title: record.title,
+          startedAt: record.startedAt,
+          endedAt: record.endedAt,
+          sessionId: record.sessionId,
+          model: record.model ?? null,
+          modelSource: record.modelSource ?? 'cli-default',
+          reasoningEffort: record.reasoningEffort ?? null,
+          effortSource: record.effortSource ?? 'cli-default',
+          chain: record.chain,
+        });
       } catch {
         // skip unreadable job directories
       }
