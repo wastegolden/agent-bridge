@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "1.6.2+codex.20261024.dsh020",
+  "version": "1.7.0+codex.20261025.dsh020",
   "description": "Bounded parallel DSH development plus cross-harness consult, review and delegation with Claude Code, under one root controller per task",
   "author": {
     "name": "agent-bridge contributors"

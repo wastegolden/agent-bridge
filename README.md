@@ -2,7 +2,7 @@
 
 # Agent Bridge
 
-Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 1.6.2，MIT。
+Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 1.7.0，MIT。
 
 > 独立项目，与 DeepSeek、OpenAI、Anthropic 均无隶属或背书关系。
 
@@ -42,7 +42,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - 网络也由任务包声明，只有被授予时才可用；
 - 生命周期是 审查（review）→ 集成（integrate）→ 确认（acknowledge）→ 归档 / 清理（archive / cleanup），每一步都要求前一步的真实证据。
 
-它暴露 19 个 `bridge_*` 工具（宿主 `bridge_capabilities` 报告的 `version` 是 **1.5.0**，与插件版本 1.6.2 不同）：
+它暴露 19 个 `bridge_*` 工具（宿主 `bridge_capabilities` 报告的 `version` 是 **1.5.0**，与插件版本 1.7.0 不同）：
 
 - 任务：`bridge_submit`、`bridge_check`、`bridge_result`、`bridge_dossier`
 - 授权：`bridge_approve`、`bridge_clarify`
@@ -248,7 +248,7 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 ## 验证
 
-1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.5.0`（插件版本是 1.6.2，两者不同）。
+1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.5.0`（插件版本是 1.7.0，两者不同）。
 2. 调用 `peer_capabilities`：Claude 端 `self` 应是 `claude-code`，Codex 端应是 `codex`；`chain` 显示自己在链上的位置，每个 peer 的每个模式会明确告诉你是否允许，以及不允许时的错误码。
 
 ## 用法
