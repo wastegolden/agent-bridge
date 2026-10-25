@@ -62,6 +62,31 @@ Continue a peer session with `sessionId` from the earlier job of the same target
 read with `peer_result`, stop with `peer_cancel`. A peer answer is a **claim**: check
 it against files, commands, tests and commit hashes before acting on it.
 
+Each call can also set the model and reasoning effort for that one run. `model` and
+`reasoningEffort` work on a new session and on a continuation (`sessionId`), so a
+session can switch either between turns without editing the config or restarting the
+server: codex gets `-c model_reasoning_effort="<E>"` (also on `exec resume`),
+claude-code gets `--effort <E>`.
+
+Precedence for both: the per-call argument, then the config default
+(`peers.codex.model` / `peers.codex.reasoningEffort`, `peers.claude-code.model` /
+`peers.claude-code.effort`), then the CLI's own default (nothing passed). Allowed
+efforts are `peers.<target>.efforts` when configured, otherwise codex
+`minimal, low, medium, high, xhigh, max, ultra` and claude-code
+`low, medium, high, xhigh, max`; a value matches the lowercase identifier pattern
+`^[a-z][a-z0-9_-]{0,31}$`. `peer_capabilities` reports `defaultModel`,
+`defaultReasoningEffort` and `reasoningEfforts` for each peer. A per-call value outside
+the list is refused with `PEER_ARGS_INVALID` (`field: reasoningEffort`), a config
+default outside it with `PEER_CONFIG_INVALID`. Every job record (`job.json`, the
+`peer_check` / `peer_result` snapshots and `peer_list` rows) carries `model`,
+`modelSource`, `reasoningEffort` and `effortSource` (`call` | `config` |
+`cli-default`), describing what was passed to the CLI.
+
+Routing hint: choose a higher effort for independent reviews and hard reasoning, a
+lower one for quick consults. This argument is peer-only; DSH tasks keep their
+per-task route and effort through `bridge_submit` `packet.model.reasoningEffort` (see
+`bridge_models` for the advertised efforts).
+
 ## Cross-model verification protocol
 
 Use for consequential decisions: architecture, security-sensitive code, root causes,

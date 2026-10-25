@@ -59,12 +59,14 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 `agent_peer`（`bin/peer-mcp.mjs`）用对方 harness 的无头 CLI（`codex exec` / `claude -p`）运行另一个 harness，提供 9 个工具：
 
-- `peer_capabilities`：我在链上的位置、现在能调谁、哪些模式被允许
+- `peer_capabilities`：我在链上的位置、现在能调谁、哪些模式被允许，以及每个 peer 的默认模型、默认思考强度和允许的思考强度列表（`defaultModel`、`defaultReasoningEffort`、`reasoningEfforts`）
 - `peer_ask`、`peer_check`、`peer_result`、`peer_cancel`、`peer_list`：作业生命周期
 - `record_closeout`、`record_list`：收尾记录与索引
 - `cleanup_run`：清理临时会话（默认 dry run）
 
 三种模式：`consult`（问答）与 `review`（独立审查）都是只读的，只给对端只读沙箱和只读工具集；`delegate`（子主控）才可能在 `cwd` / `addDirs` 里写。链规则由服务端强制，不靠提示词：不能把目标指向自己、不能调用链上已有的任何 harness（于是工作永远流不回根主控）、跳数上限默认 2、子主控委派深度默认 1。
+
+每次 `peer_ask` 都可以为这一次运行单独指定 `model` 和 `reasoningEffort`，新建会话和用 `sessionId` 续接会话都生效，所以同一个任务可以在轮次之间切换模型和思考强度，不必改配置或重启 MCP server。优先级是：单次调用参数 > 配置默认值（`peers.codex.model` / `peers.codex.reasoningEffort`、`peers.claude-code.model` / `peers.claude-code.effort`）> CLI 自身默认值（不传任何值），单次 `reasoningEffort` 的取值匹配 `^[a-z][a-z0-9_-]{0,31}$`。每个作业记录（`job.json`、`peer_check` / `peer_result` 的作业快照、`peer_list` 行）都带 `model`（string|null）、`modelSource`、`reasoningEffort`（string|null）、`effortSource`，来源取值 `call` / `config` / `cli-default`，表示实际传给 CLI 的内容（没传时是 `null` + `cli-default`）；closeout 记录显示为 `- 模型: <model or 'CLI 默认'>（<source>） · 思考强度: <effort or 'CLI 默认'>（<source>）`，没有这些字段的旧作业显示原有的缺失标记。
 
 `record_closeout` 为每个根任务写一份 Markdown 记录到 `<project>/.agent-bridge/records/`，并通过 `.git/info/exclude` 排除出版本库（不改项目自己的 `.gitignore`），同时往外部索引 `<stateDir>/records-index.jsonl` 追加一条事件。之后清扫器会自动清理临时的 peer / DSH 会话：**已被记录接受的 3 天后**、**failed / disputed / unresolved 的 30 天后**，`keep` 的永不清理；DSH 会话没有删除 API，因此是归档后清理。索引是会话 id 的唯一来源，记录文件缺失时不会清理任何会话。
 
@@ -235,7 +237,8 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 - `stateDir`：作业账本、链账本和记录索引的位置。
 - `peers.<name>.executable`：对端无头 CLI 的绝对路径，可用整段 `*` 选最新版本；必须是真实可执行文件，不能是 `.cmd` / `.bat` 包装（否则配置被拒）。
 - `peers.codex.delegateSandbox`：`delegate` 模式的 Codex 沙箱（`read-only` 或 `workspace-write`）。`readOnlyDisablePlugins` 在只读模式下禁用指定插件，防止审查者通过 MCP 工具动手。
-- `peers.codex.reasoningEffort` / `peers.codex.model`：可选，且是**全局**的——对每一次 Codex peer 调用都生效。
+- `peers.codex.model` / `peers.codex.reasoningEffort`、`peers.claude-code.model` / `peers.claude-code.effort`：可选，只是**默认值**，单次 `peer_ask` 可以用同名参数覆盖；都不传时用 CLI 自身的默认。
+- `peers.<target>.efforts`：可选，替换该目标的允许思考强度列表（1 到 16 个唯一字符串，每个匹配 `^[a-z][a-z0-9_-]{0,31}$`）。不写时用内置列表：codex `minimal, low, medium, high, xhigh, max, ultra`，claude-code `low, medium, high, xhigh, max`。列表外的单次值被拒为 `PEER_ARGS_INVALID`（字段 `reasoningEffort`），列表外的配置默认值被拒为 `PEER_CONFIG_INVALID`。
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`：`delegate` 模式的权限模式与允许的工具；`review` / `consult` 走只读工具集与 `--no-session-persistence`。
 - `records`：记录目录名、接受后的保留天数、失败/争议的保留天数、清扫间隔、Claude 会话目录。
 - `bridge`：清扫器使用的 DSH 端点；令牌优先取 `DSH_MCP_TOKEN`，`credentialFile` 是可选的后备。
@@ -254,8 +257,9 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 1. 交给 DSH 实现：*"把这个改动拆成有边界的任务交给 DSH：只允许改 `src/foo/`，验收是 `npm test` 通过，跑完把 diff 和测试输出给我。"*
 2. 让另一个 harness 独立审查：*"让 Codex 独立 review 这个 commit 的正确性，不要告诉它作者是谁，也不要给它我的结论。"*
-3. 让 Codex 当子主控：*"这个子项目交给 Codex 当子主控，它可以用自己的 subagent 和 DSH，范围是 `packages/parser/`，结果返回给我集成。"*
-4. 收尾并清理：*"收尾这个根任务：写 closeout 记录，然后 dry run 一次清理，确认后再执行。"*
+3. 指定思考强度做独立审查：*"让 Codex 以 xhigh 思考强度独立 review 这个 commit，不要告诉它作者是谁，也不要给它我的结论。"*
+4. 让 Codex 当子主控：*"这个子项目交给 Codex 当子主控，它可以用自己的 subagent 和 DSH，范围是 `packages/parser/`，结果返回给我集成。"*
+5. 收尾并清理：*"收尾这个根任务：写 closeout 记录，然后 dry run 一次清理，确认后再执行。"*
 
 规则只有一条：**你在对话的那个 harness 是这个任务的根主控**，它独自拥有需求、接口合同、授权、验收与集成，交出去的每一件东西都只能作为结果回到它这里。别人不能跳过它去改需求，也不能把工作再委托回它。
 
@@ -274,7 +278,6 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 - 只在 **Windows** 上验证过；其他平台的代码路径存在但未测试。
 - **DSH 0.2.0-rc.2 是预览版**，API 可能变化。
-- Codex 的推理强度**不能按单次 peer 调用设置**，只能全局配置 `peers.codex.reasoningEffort`。
 - 自动清扫只在**开着带插件的 Claude Code 或 Codex 会话时**运行。
 - 无头 CLI 必须先各自登录过一次，否则 peer 调用失败。
 

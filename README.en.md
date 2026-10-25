@@ -59,12 +59,14 @@ It exposes 19 `bridge_*` tools (the host's `bridge_capabilities` reports `versio
 
 `agent_peer` (`bin/peer-mcp.mjs`) runs the other harness through its headless CLI (`codex exec` / `claude -p`) and exposes 9 tools:
 
-- `peer_capabilities`: where I sit on the chain, whom I may call right now, which modes are allowed
+- `peer_capabilities`: where I sit on the chain, whom I may call right now, which modes are allowed, and each peer's default model, default reasoning effort and allowed effort list (`defaultModel`, `defaultReasoningEffort`, `reasoningEfforts`)
 - `peer_ask`, `peer_check`, `peer_result`, `peer_cancel`, `peer_list`: job lifecycle
 - `record_closeout`, `record_list`: closeout records and index
 - `cleanup_run`: sweep temporary sessions (dry run by default)
 
 Three modes: `consult` (a question) and `review` (an independent review) are read-only — the peer gets a read-only sandbox and a read-only tool set; only `delegate` (sub-controller) may write inside `cwd` / `addDirs`. The chain rules are enforced by the server, not by prompts: no self target, no call to any harness already on the chain (so work can never flow back to the root controller), at most 2 hops below the root by default, and sub-controller appointment only to a default depth of 1.
+
+Every `peer_ask` can also set `model` and `reasoningEffort` for that one run — for a new session and for a continuation (`sessionId`) alike — so one task can switch model and effort between turns without editing the config or restarting the MCP server. Precedence for both: the per-call argument, then the config default (`peers.codex.model` / `peers.codex.reasoningEffort`, `peers.claude-code.model` / `peers.claude-code.effort`), then the CLI's own default (nothing passed); a per-call `reasoningEffort` value matches `^[a-z][a-z0-9_-]{0,31}$`. Every job record (`job.json`, the `peer_check` / `peer_result` job snapshots, `peer_list` rows) carries `model` (string|null), `modelSource`, `reasoningEffort` (string|null) and `effortSource`, with source `call` / `config` / `cli-default`, describing what was actually passed to the CLI (null + `cli-default` when nothing was passed); the closeout record shows the line `- 模型: <model or 'CLI 默认'>（<source>） · 思考强度: <effort or 'CLI 默认'>（<source>）`, and older jobs without the fields show the existing missing-value marker.
 
 `record_closeout` writes one Markdown record per root task into `<project>/.agent-bridge/records/`, excluded from git through `.git/info/exclude` (the project's own `.gitignore` is not touched), and appends one event to an external index at `<stateDir>/records-index.jsonl`. A sweeper then cleans up the temporary peer / DSH sessions automatically: **3 days** after an accepted record, **30 days** for failed / disputed / unresolved ones, and never for `keep`. DSH sessions have no delete API, so they are archived and then cleaned. The index is the only source of session ids, and nothing is swept while the record file is missing.
 
@@ -235,7 +237,8 @@ The main keys:
 - `stateDir`: the job ledger, the chain ledger and the records index.
 - `peers.<name>.executable`: absolute path of the peer headless CLI; whole `*` segments pick the newest version. It must be the real executable, not a `.cmd` / `.bat` shim (otherwise the config is refused).
 - `peers.codex.delegateSandbox`: the Codex sandbox for `delegate` (`read-only` or `workspace-write`). `readOnlyDisablePlugins` disables the listed plugins in read-only runs, so a reviewer cannot act through MCP tools.
-- `peers.codex.reasoningEffort` / `peers.codex.model`: optional, and **global** — they apply to every Codex peer call.
+- `peers.codex.model` / `peers.codex.reasoningEffort` and `peers.claude-code.model` / `peers.claude-code.effort`: optional **defaults** that a single `peer_ask` may override with the same argument; when neither is passed the CLI's own default applies.
+- `peers.<target>.efforts`: optional, replaces the allowed reasoning-effort list for that target (1 to 16 unique strings, each matching `^[a-z][a-z0-9_-]{0,31}$`). When absent the built-in list applies: codex `minimal, low, medium, high, xhigh, max, ultra`; claude-code `low, medium, high, xhigh, max`. A per-call value outside the list is refused with `PEER_ARGS_INVALID` (field `reasoningEffort`), a config default outside it with `PEER_CONFIG_INVALID`.
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`: permission mode and allowed tools for `delegate`; `review` / `consult` use the read-only tool set and `--no-session-persistence`.
 - `records`: record directory name, retention after acceptance, retention for failed/disputed work, sweep interval, and the Claude sessions directory.
 - `bridge`: the DSH endpoint used by the cleanup sweeper; the token comes from `DSH_MCP_TOKEN` first, with an optional `credentialFile` as the fallback.
@@ -254,8 +257,9 @@ Some requests you can just type:
 
 1. Delegate to DSH: *"Break this change into bounded tasks and give them to DSH: only `src/foo/` may be written, acceptance is `npm test` passing; give me the diff and the test output."*
 2. Independent review by the other harness: *"Have Codex independently review this commit for correctness; don't tell it who wrote it and don't give it my conclusion."*
-3. Codex as sub-controller: *"Hand this sub-project to Codex as sub-controller — it may use its own subagents and DSH, scope is `packages/parser/`, and the result comes back to me for integration."*
-4. Close out and clean up: *"Close out this root task: write the closeout record, then dry-run the cleanup and only then run it."*
+3. Independent review at a chosen effort: *"Have Codex independently review this commit at xhigh reasoning effort; don't tell it who wrote it and don't give it my conclusion."*
+4. Codex as sub-controller: *"Hand this sub-project to Codex as sub-controller — it may use its own subagents and DSH, scope is `packages/parser/`, and the result comes back to me for integration."*
+5. Close out and clean up: *"Close out this root task: write the closeout record, then dry-run the cleanup and only then run it."*
 
 There is one rule: **the harness you are talking to is the root controller of the task**, and it alone owns requirements, interface contracts, authorization, acceptance and integration — everything it hands out comes back as a result it must verify. No one routes around it to change requirements, and no work is delegated back to it.
 
@@ -274,7 +278,6 @@ There is one rule: **the harness you are talking to is the root controller of th
 
 - Verified on **Windows** only; other platforms have code paths but are untested.
 - **DSH 0.2.0-rc.2 is a preview** and its APIs can change.
-- Codex reasoning effort **cannot be set per peer call**; only globally through `peers.codex.reasoningEffort`.
 - The automatic cleanup runs only **while a Claude Code or Codex session with the plugin is open**.
 - Each headless CLI must be logged in once, or peer calls fail.
 
