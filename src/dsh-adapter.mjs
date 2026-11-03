@@ -97,6 +97,28 @@ const MAX_BUFFERED_EVENTS = 5000
 const ROLES = new Set(['investigate', 'implement', 'review', 'integrate'])
 
 /**
+ * Reopen-session variants shared by `reconsider` (clarification) and `followup`.
+ * `#reopenSession` is the single implementation of every lifecycle gate; a variant
+ * changes ONLY the continuation kind, the attempt mode, the recovery history source
+ * and the prompt requirement (contract `bridge-followup-plan-v1`).
+ */
+const CLARIFY_VARIANT = Object.freeze({
+  method: 'reconsider',
+  continuation: 'clarification',
+  mode: 'understanding',
+  noun: 'clarification attempt',
+  conflict: 'non-clarification'
+})
+
+const FOLLOWUP_VARIANT = Object.freeze({
+  method: 'followup',
+  continuation: 'followup',
+  mode: 'execution',
+  noun: 'follow-up attempt',
+  conflict: 'non-follow-up'
+})
+
+/**
  * Recursive-delegation tools in the installed `standard` agent preset. All of
  * them are denied for every bounded task: CONTRACTS.md fixes
  * `scope.allowDelegation: false`, and AGENTS.md forbids recursive delegation.
@@ -2596,7 +2618,11 @@ export class DshAdapter {
     const record = this.#records.get(runtime.taskId)
     const attempt = record !== undefined && record.current !== undefined ? record.current : undefined
     const sharedCap = attempt?.plan?.budgets?.maxToolCalls
-    if (Number.isInteger(sharedCap) && record.toolCallsAdmitted >= sharedCap) {
+    // A follow-up attempt counts only ITS OWN admitted calls against the shared cap:
+    // `roundBudgetBase` is the monotone counter snapshot taken when it was minted, so
+    // previously consumed rounds cannot starve a new round's children.
+    const sharedBase = Number.isInteger(attempt?.roundBudgetBase) ? attempt.roundBudgetBase : 0
+    if (Number.isInteger(sharedCap) && record.toolCallsAdmitted - sharedBase >= sharedCap) {
       runtime.budgetExhausted = runtime.budgetExhausted ?? { budget: 'maxToolCalls', limit: sharedCap, scope: 'root-shared', at: this.#now() }
       this.#recordChildBudgetDenial(runtime, { budget: 'maxToolCalls', limit: sharedCap, scope: 'root-shared', name })
       return `[dsh-adapter] tool-call budget exhausted (budget.maxToolCalls=${sharedCap}); this child shares its parent's tool budget`
@@ -3822,7 +3848,8 @@ export class DshAdapter {
    * Resolve a task reference. Two forms are accepted:
    *
    * 1. **Task envelope** (the root's `src/service.mjs` passes `{...task, packet}`):
-   *    `{id, revision, attemptId, packet, prompt?, effectiveModel?, sessionId?, understanding?}`.
+   *    `{id, revision, attemptId, packet, prompt?, effectiveModel?, sessionId?, understanding?,
+   *    clarifications?, followups?, continuationKind?}`.
    *    Envelope identity is authoritative and is bound, never re-derived.
    * 2. **Bare TaskPacket** (`schemaVersion === 1` at the top level): identity is
    *    derived from `packet.id`/`packet.idempotencyKey` and the prompt is composed
@@ -3871,6 +3898,16 @@ export class DshAdapter {
         ? input.clarifications.filter((entry) => isPlainObject(entry)).map((entry) => jsonSafe(entry))
         : undefined
       const previousAttempt = isPlainObject(input.previousAttempt) ? jsonSafe(input.previousAttempt) : undefined
+      // Service-private follow-up history (contract `bridge-followup-plan-v1`). Only the
+      // `followups[]` entry whose `attemptId` matches the attempt being recovered may
+      // bind reset recovery, through its trusted `boundAttempt` predecessor snapshot.
+      const followups = Array.isArray(input.followups)
+        ? input.followups.filter((entry) => isPlainObject(entry)).map((entry) => jsonSafe(entry))
+        : undefined
+      // The continuation kind persisted for the CURRENT attempt. `followup` keeps a
+      // restored running attempt in execution mode (never the understanding fence).
+      const continuationKind =
+        typeof input.continuationKind === 'string' && input.continuationKind.length > 0 ? input.continuationKind : undefined
       // Service-persisted UI-archive evidence. `sessionArchivedAt` is the UI hide
       // marker and `archivedAt` is the (separate) physical-cleanup marker; either
       // proves the session is hidden when the adapter has no local memory of it.
@@ -3902,6 +3939,8 @@ export class DshAdapter {
         confirmedCancellation:input.status==='cancelled'&&input.stopConfirmed===true&&Array.isArray(input.result?.evidence)&&input.result.evidence.some(e=>e.source==='dsh-host'&&e.kind==='attempt-settlement'&&e.requestId===requestId&&e.attemptId===attemptId&&e.stopDetail==='host-idle-after-cancel'),
         clarifications,
         previousAttempt,
+        followups,
+        continuationKind,
         sessionArchivedAt: archivedSpelling,
         packet,
         prompt,
@@ -4429,6 +4468,24 @@ export class DshAdapter {
           'host idleness positively known with no queued items and no owned live jobs'
         ],
         recovery: 'trusted persisted clarifications[].previousAttempt only; a missing or mismatched snapshot is refused'
+      },
+      followup: {
+        supported: true,
+        mode: 'execution',
+        roles: ['investigate', 'review'],
+        session: 'existing owned session only',
+        model: 'reuses the bound route',
+        budget: 'each follow-up gets the original packet budget (per-attempt base)',
+        excludes: ['packet.project', 'project workers', 'unapproved understanding gate'],
+        gates: [
+          'codex-bridge origin and matching ownerId',
+          'exact revision, sessionId and immutable packet digest',
+          'record is neither cleaned up nor UI-archived',
+          'previous attempt is terminal',
+          'host idleness positively known with no queued items and no owned live jobs'
+        ],
+        recovery: 'followups[].boundAttempt only; a cold host restart with no live agent is refused (guarded-agent-absent)',
+        limits: { followupIdMaxChars: 200, textMaxChars: 20000 }
       },
       archive: {
         supported: archiveSupported,
@@ -5283,29 +5340,101 @@ export class DshAdapter {
    * @returns {Promise<object>} store-safe receipt with the SAME sessionId and a NEW requestId/attemptId.
    */
   async reconsider(task, hooks = {}) {
+    return this.#reopenSession(task, hooks, CLARIFY_VARIANT)
+  }
+
+  /**
+   * Create a NEW execution attempt for a settled task in the EXISTING owned session
+   * (contract `bridge-followup-plan-v1`).
+   *
+   * It shares every lifecycle gate with `reconsider` — owner/origin provenance, exact
+   * revision/sessionId, immutable packet digest, cleaned/archived, bound route, fresh
+   * settled host proof, guarded live agent and recovery trust — but the attempt runs
+   * in `execution` mode, reuses the plan already bound to the record, requires a
+   * controller-built prompt, and receives a fresh per-attempt tool budget
+   * (`attempt.roundBudgetBase = record.toolCallsAdmitted`).
+   *
+   * After an adapter reset, recovery binds ONLY the trusted persisted
+   * `followups[]` entry whose `attemptId` matches this attempt, through that entry's
+   * `boundAttempt` predecessor snapshot; `confirmedCancellation` is recomputed from
+   * that snapshot, never from the envelope. A missing or mismatched snapshot is
+   * refused with `dispatched:false`: no replay, no adoption, no new session.
+   *
+   * @param {object} task - task envelope carrying the controller-built prompt and a NEW attemptId.
+   * @param {{onEvent?: Function, onResult?: Function}} [hooks] - host callbacks.
+   * @returns {Promise<object>} store-safe receipt with the SAME sessionId and a NEW requestId/attemptId.
+   */
+  async followup(task, hooks = {}) {
+    return this.#reopenSession(task, hooks, FOLLOWUP_VARIANT)
+  }
+
+  /**
+   * Shared body of `reconsider` and `followup`: reopen the ONE owned session with a
+   * NEW attempt, after re-proving every lifecycle fence. The variant selects only
+   * the continuation kind, the attempt mode, the trusted recovery history source and
+   * the prompt requirement; every gate and its order is shared.
+   *
+   * @param {object} task - task envelope.
+   * @param {{onEvent?: Function, onResult?: Function}} [hooks] - host callbacks.
+   * @param {{method:string, continuation:string, mode:string, noun:string}} variant - reopen variant.
+   * @returns {Promise<object>} store-safe receipt.
+   */
+  async #reopenSession(task, hooks, variant) {
     if (this.#disposed) throw adapterError('adapter/disposed', 'this adapter has been disposed', {})
     const ref = this.#resolveEnvelope(task)
-    if (ref.packet === undefined) throw adapterError('adapter/invalid-packet', 'reconsider requires a task packet', {})
+    if (ref.packet === undefined) throw adapterError('adapter/invalid-packet', `${variant.method} requires a task packet`, {})
+    // A follow-up is a controller-built prompt and never re-composes execution
+    // instructions locally; a missing prompt is a bounded request error.
+    if (variant.continuation === 'followup' && (typeof ref.prompt !== 'string' || ref.prompt.length === 0)) {
+      throw adapterError('adapter/invalid-packet', `task "${ref.id}" needs a nonempty controller-built prompt for a ${variant.noun}`, {
+        taskId: ref.id,
+        field: 'prompt'
+      })
+    }
 
     let record = this.#records.get(ref.id)
     let recoveryReport = null
     if (record === undefined) {
       // Adapter reset: bind the owned session from the trusted persisted history,
-      // never from the envelope's own sessionId claim.
-      const binding = this.#persistedPreviousAttempt(ref)
+      // never from the envelope's own sessionId claim. A clarification reads
+      // `clarifications[].previousAttempt`; a follow-up reads the `followups[]`
+      // entry minted for THIS attempt and its `boundAttempt` predecessor snapshot.
+      const binding =
+        variant.continuation === 'followup' ? this.#persistedFollowupBinding(ref) : this.#persistedPreviousAttempt(ref)
       if (binding.ok !== true) {
-        throw adapterError('adapter/recovery-unsafe', `cannot recover task "${ref.id}" for a clarification attempt: ${binding.reason}`, {
+        throw adapterError('adapter/recovery-unsafe', `cannot recover task "${ref.id}" for a ${variant.noun}: ${binding.reason}`, {
           taskId: ref.id,
           reason: binding.reason,
           dispatched: false
         })
       }
+      const bound = binding.previous
       const recoveryRef = {
         ...ref,
-        sessionId: binding.previous.sessionId,
-        requestId: binding.previous.requestId,
-        attemptId: binding.previous.attemptId,
-        effectiveModel: binding.previous.effectiveModel ?? ref.effectiveModel
+        sessionId: bound.sessionId,
+        requestId: bound.requestId,
+        attemptId: bound.attemptId,
+        effectiveModel: bound.effectiveModel ?? ref.effectiveModel,
+        // A cancelled predecessor may have settled without a durable turn/end
+        // (host confirmed idle after the cancel request). That fact is re-proven
+        // from the TRUSTED boundAttempt snapshot and its host settlement evidence,
+        // never from a caller-supplied envelope.
+        ...(variant.continuation === 'followup'
+          ? {
+              confirmedCancellation:
+                bound.status === 'cancelled' &&
+                bound.stopConfirmed === true &&
+                Array.isArray(bound.settlementEvidence) &&
+                bound.settlementEvidence.some(
+                  (entry) =>
+                    entry.source === 'dsh-host' &&
+                    entry.kind === 'attempt-settlement' &&
+                    entry.requestId === bound.requestId &&
+                    entry.attemptId === bound.attemptId &&
+                    entry.stopDetail === 'host-idle-after-cancel'
+                )
+            }
+          : {})
       }
       const recovery = await this.#recoverTask(recoveryRef)
       record = recovery.record
@@ -5319,7 +5448,7 @@ export class DshAdapter {
       }
     }
     // Durable previous-request binding, workspace cwd, bound route and restored
-    // guard are re-proven on EVERY reconsider of a recovered record — including a
+    // guard are re-proven on EVERY reopen of a recovered record — including a
     // record `#recoverTask` cached during a previous call or a prior `inspect()`.
     // A cached record is never itself evidence of trust, so a first refusal can
     // never be laundered into a dispatch by repeating the call. Missing or
@@ -5329,7 +5458,7 @@ export class DshAdapter {
       if (trust.ok !== true) {
         throw adapterError(
           'adapter/recovery-unsafe',
-          `cannot start a clarification attempt for task "${ref.id}" after an adapter reset: ${trust.reason}; ` +
+          `cannot start a ${variant.noun} for task "${ref.id}" after an adapter reset: ${trust.reason}; ` +
             'the previous attempt was not replayed and no new session was adopted',
           { taskId: ref.id, dispatched: false, ...(trust.details ?? {}) }
         )
@@ -5340,12 +5469,13 @@ export class DshAdapter {
     this.#assertOwnership(record, ref)
     if (record.cleanedUp === true) throw adapterError('adapter/task-cleaned', `task "${ref.id}" has been cleaned up`, { taskId: ref.id })
     if (record.uiHidden === true || this.#archivedSessions.has(record.sessionId) || ref.sessionArchivedAt !== undefined) {
-      throw adapterError('adapter/task-archived', `task "${ref.id}" is UI-archived; a clarification attempt requires a visible owned session`, {
+      throw adapterError('adapter/task-archived', `task "${ref.id}" is UI-archived; a ${variant.noun} requires a visible owned session`, {
         taskId: ref.id
       })
     }
-    // Immutable packet fence: a clarification explains the authorized task and can
-    // never change its scope, acceptance, role, cwd or identity.
+    // Immutable packet fence: a clarification explains the authorized task and a
+    // follow-up continues it; neither can change its scope, acceptance, role, cwd or
+    // identity.
     if (digestPacket(ref.packet) !== record.requestDigest) {
       throw adapterError('adapter/packet-changed', `task "${ref.id}" was started with a different immutable packet`, {
         taskId: ref.id,
@@ -5353,13 +5483,13 @@ export class DshAdapter {
       })
     }
 
-    // Idempotent replay of an already-minted clarification attemptId: return the
-    // stored receipt without dispatching a second prompt. The same id bound to a
-    // non-clarification attempt is a conflict, never a silent re-dispatch.
+    // Idempotent replay of an already-minted attemptId: return the stored receipt
+    // without dispatching a second prompt. The same id bound to an attempt of the
+    // OTHER continuation is a conflict, never a silent re-dispatch.
     if (ref.attemptId !== undefined) {
       const existingAttempt = record.attempts.find((candidate) => candidate.attemptId === ref.attemptId)
-      if (existingAttempt !== undefined && existingAttempt.continuation !== 'clarification') {
-        throw adapterError('adapter/attempt-conflict', `attemptId "${ref.attemptId}" is already bound to a non-clarification attempt for task "${ref.id}"`, {
+      if (existingAttempt !== undefined && existingAttempt.continuation !== variant.continuation) {
+        throw adapterError('adapter/attempt-conflict', `attemptId "${ref.attemptId}" is already bound to a ${variant.conflict} attempt for task "${ref.id}"`, {
           taskId: ref.id,
           attemptId: ref.attemptId
         })
@@ -5377,8 +5507,8 @@ export class DshAdapter {
       })
     }
 
-    // Route fence: a clarification never changes the model route already bound to
-    // the task, and it never selects a fallback.
+    // Route fence: a reopen never changes the model route already bound to the
+    // task, and it never selects a fallback.
     const requested = this.#resolveRequestedRoute(ref, ref.packet)
     const knownRoute = previous?.effectiveModel ?? record.durableModel
     if (isPlainObject(knownRoute) && (knownRoute.provider !== requested.provider || knownRoute.model !== requested.model)) {
@@ -5398,7 +5528,7 @@ export class DshAdapter {
     // `sessionController.prompt` resolves/resumes such a session, and the same
     // session may meanwhile have been rebound to a NEW agent object. In both cases
     // the guard attached to `record.agent` would not cover the agent that runs the
-    // clarification. Require the CURRENT live agent to be positively known and
+    // new attempt. Require the CURRENT live agent to be positively known and
     // identical to the guarded `record.agent` before clearing `stopConfirmed`,
     // minting an attempt or dispatching. The check is synchronous and last, so no
     // await can make the proof stale between it and `#submit`. Archive keeps its own
@@ -5411,7 +5541,7 @@ export class DshAdapter {
       const code = unknown.length > 0 ? 'adapter/host-state-unknown' : 'adapter/host-not-settled'
       throw adapterError(
         code,
-        `task "${ref.id}" cannot start a clarification attempt: ${blockers.length > 0 ? blockers.join(', ') : unknown.join('; ')}`,
+        `task "${ref.id}" cannot start a ${variant.noun}: ${blockers.length > 0 ? blockers.join(', ') : unknown.join('; ')}`,
         { taskId: ref.id, blockers, unknown, observed: [...proof.observed, guardedAgent.observed], dispatched: false }
       )
     }
@@ -5422,16 +5552,23 @@ export class DshAdapter {
     const plan = previous?.plan ?? record.plan ?? this.#planEnforcement(ref.packet, { callbackBinding: ref.callbackBinding })
     const effectiveModel = previous?.effectiveModel ?? ref.effectiveModel ?? requested
     const promptText =
-      typeof ref.prompt === 'string' && ref.prompt.length > 0
+      variant.continuation === 'followup'
         ? ref.prompt
-        : this.#composeUnderstandingPrompt(ref.packet, effectiveModel)
+        : typeof ref.prompt === 'string' && ref.prompt.length > 0
+          ? ref.prompt
+          : this.#composeUnderstandingPrompt(ref.packet, effectiveModel)
 
     // The record is no longer settled once this new attempt may dispatch.
     record.stopConfirmed = false
-    const attempt = this.#newAttempt(record, 'understanding', isPlainObject(hooks) ? hooks : record.hooks, ref.attemptId)
+    const attempt = this.#newAttempt(record, variant.mode, isPlainObject(hooks) ? hooks : record.hooks, ref.attemptId)
     attempt.effectiveModel = effectiveModel
     attempt.plan = plan
-    attempt.continuation = 'clarification'
+    attempt.continuation = variant.continuation
+    // Per-attempt budget base (contract `bridge-followup-plan-v1`): the monotone
+    // cumulative counter stays intact for children/evidence, while the guard and the
+    // child shared-cap check count only THIS attempt's admitted calls, so a follow-up
+    // receives the original packet allowance even after the previous round exhausted it.
+    if (variant.continuation === 'followup') attempt.roundBudgetBase = record.toolCallsAdmitted
     this.#ensureBridgeTools(record, plan)
 
     await this.#submit(record, attempt, promptText)
@@ -6137,6 +6274,86 @@ export class DshAdapter {
   }
 
   /**
+   * Resolve the trusted persisted follow-up binding used to rebind an owned session
+   * after an adapter reset (contract `bridge-followup-plan-v1`).
+   *
+   * It reads ONLY the `followups[]` entry whose `attemptId` matches the attempt this
+   * dispatch mints, and uses that entry's `boundAttempt` predecessor snapshot — the
+   * attempt that really bound the owned session. Owner/origin/revision/sessionId are
+   * validated exactly like `#persistedPreviousAttempt`; a missing entry, a missing
+   * or incomplete `boundAttempt`, or a mismatched revision/session is refused —
+   * never replaced by a caller-supplied session.
+   *
+   * @param {object} ref - resolved persisted-envelope reference.
+   * @returns {{ok:true, previous:object}|{ok:false, reason:string}} binding verdict.
+   */
+  #persistedFollowupBinding(ref) {
+    const expected = this.#options.ownerId
+    if (typeof expected !== 'string' || expected.length === 0) {
+      return { ok: false, reason: 'no ownerId is configured for this adapter, so persisted history cannot be trusted' }
+    }
+    if (ref.envelope !== true || ref.packet === undefined) return { ok: false, reason: 'not a persisted task envelope' }
+    if (ref.origin !== 'codex-bridge') return { ok: false, reason: `task origin "${ref.origin ?? '(absent)'}" is not "codex-bridge"` }
+    if (ref.ownerId !== expected) return { ok: false, reason: 'task ownerId does not match this adapter owner' }
+    const list = Array.isArray(ref.followups) ? ref.followups : []
+    const entry =
+      ref.attemptId === undefined
+        ? undefined
+        : list.find((candidate) => isPlainObject(candidate) && candidate.attemptId === ref.attemptId)
+    if (entry === undefined) {
+      return {
+        ok: false,
+        reason: 'no trusted followups[] entry matches this attemptId, so the owned session cannot be rebound'
+      }
+    }
+    const snapshot = isPlainObject(entry.boundAttempt) ? entry.boundAttempt : undefined
+    if (snapshot === undefined) {
+      return {
+        ok: false,
+        reason: 'the trusted followups[] entry carries no boundAttempt snapshot, so the owned session cannot be rebound'
+      }
+    }
+    const problems = []
+    const sessionId = typeof snapshot.sessionId === 'string' && snapshot.sessionId.length > 0 ? snapshot.sessionId : undefined
+    const requestId = typeof snapshot.requestId === 'string' && snapshot.requestId.length > 0 ? snapshot.requestId : undefined
+    const attemptId = typeof snapshot.attemptId === 'string' && snapshot.attemptId.length > 0 ? snapshot.attemptId : undefined
+    if (sessionId === undefined) problems.push('boundAttempt.sessionId')
+    if (requestId === undefined) problems.push('boundAttempt.requestId')
+    if (attemptId === undefined) problems.push('boundAttempt.attemptId')
+    if (!Number.isInteger(snapshot.revision) || snapshot.revision <= 0) problems.push('boundAttempt.revision')
+    if (problems.length > 0) return { ok: false, reason: `trusted boundAttempt is incomplete (${problems.join(', ')})` }
+    if (snapshot.revision !== ref.revision) {
+      return { ok: false, reason: `boundAttempt.revision ${snapshot.revision} does not match the requested revision ${ref.revision}` }
+    }
+    if (ref.sessionId !== undefined && ref.sessionId !== sessionId) {
+      return { ok: false, reason: 'the requested sessionId does not match the trusted boundAttempt.sessionId' }
+    }
+    let effectiveModel
+    if (isPlainObject(snapshot.effectiveModel) && typeof snapshot.effectiveModel.provider === 'string' && typeof snapshot.effectiveModel.model === 'string') {
+      effectiveModel = {
+        provider: snapshot.effectiveModel.provider,
+        model: snapshot.effectiveModel.model,
+        ...(typeof snapshot.effectiveModel.reasoningEffort === 'string' ? { reasoningEffort: snapshot.effectiveModel.reasoningEffort } : {})
+      }
+    }
+    return {
+      ok: true,
+      previous: {
+        sessionId,
+        requestId,
+        attemptId,
+        revision: snapshot.revision,
+        effectiveModel,
+        // Carried only for the follow-up variant's `confirmedCancellation`
+        // recomputation; missing/invalid settlement evidence simply never confirms.
+        status: snapshot.status,
+        stopConfirmed: snapshot.stopConfirmed === true,
+        settlementEvidence: Array.isArray(snapshot.settlementEvidence) ? jsonSafe(snapshot.settlementEvidence) : undefined
+      }
+    }
+  }
+
+  /**
    * Re-enforce the trusted recovery checks for a lifecycle dispatch on a RECOVERED
    * record (lifecycle repair 20260925.2). `#recoverTask` caches its record before a
    * caller validates it, so a cached record is NEVER by itself evidence of trust:
@@ -6514,7 +6731,11 @@ export class DshAdapter {
       index: 0,
       attemptId: ref.attemptId,
       requestId: ref.requestId,
-      mode: ref.packet.understandingRequired === true ? 'understanding' : 'execution',
+      // A follow-up continuation restored after a reset keeps EXECUTION mode even
+      // when the immutable packet carries `understandingRequired` (the gate was
+      // approved before the follow-up): the restored guard must not install the
+      // understanding read-only fence over an already authorized attempt.
+      mode: ref.continuationKind === 'followup' ? 'execution' : ref.packet.understandingRequired === true ? 'understanding' : 'execution',
       state: bound !== undefined && bound.terminal ? mapTerminalStatus(bound.stopReason) : 'unknown',
       hooks: {},
       claimed: bound !== undefined && bound.claimed === true,
