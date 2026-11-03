@@ -17,6 +17,11 @@
 //   * Sessions already recorded as 'deleted', 'archived' or 'skipped' are FINAL: they are
 //     never acted on again. A 'failed' session is retried while it has fewer than
 //     `maxAttempts` failure events in the index, then it is left alone.
+//   * A session still referenced by another record that is kept (`keep: true`) or not yet
+//     due (no finite eligibleAt, or one later than now) is never acted on for an older
+//     record: it is reported 'skipped' with NOTE_SESSION_STILL_REFERENCED. Within one
+//     sweep the same session is acted on at most once, even when several due records name
+//     it. This applies to every harness, not only dsh.
 //   * The record file is the evidence that the result was captured. When it is missing the
 //     record's actionable sessions are NOT cleaned: they are reported (and, outside dryRun,
 //     recorded) as 'skipped' with the note 'record file missing'.
@@ -26,9 +31,11 @@
 //
 // Modes:
 //   * dryRun (the default): no action API is called and nothing is written. Every action
-//     that would be attempted carries state 'planned'. Two determinations are local and
+//     that would be attempted carries state 'planned'. Three determinations are local and
 //     call-free, so they keep their real outcome even in dryRun: an invalid id
-//     ('failed' / 'invalid id') and a due record whose record file is missing.
+//     ('failed' / 'invalid id'), a session still referenced by a kept/not-yet-due record
+//     ('skipped' / NOTE_SESSION_STILL_REFERENCED) and a due record whose record file is
+//     missing ('skipped' / 'record file missing').
 //   * dryRun === false: each finished action appends exactly ONE `{kind:'session'}` index
 //     event immediately after it, so a crash in the middle of a sweep can never repeat a
 //     deletion that already completed.
@@ -73,6 +80,8 @@ const NOTE_CLAUDE_FILE_MISSING = 'session file not found';
 const NOTE_CLAUDE_AMBIGUOUS = 'ambiguous';
 const NOTE_BRIDGE_UNAVAILABLE = 'bridge unavailable';
 const NOTE_UNSUPPORTED_HARNESS = 'unsupported harness';
+/** A session named by a record that is still kept or not yet eligible must survive. */
+const NOTE_SESSION_STILL_REFERENCED = 'session still referenced by another record';
 
 /** The exported names of this module, so a caller can assert the surface. */
 export const SWEEPER_EXPORTS = Object.freeze(['sweepRecords']);
@@ -133,6 +142,16 @@ function actionForHarness(harness) {
 function sessionKeyOf(recordId, harness, id) {
   const recordPart = recordId === null || recordId === undefined ? '' : String(recordId);
   return `${recordPart}\u0000${harness}\u0000${id}`;
+}
+
+/**
+ * The reference key of one session, deliberately WITHOUT the record: whether a session
+ * may be acted on depends on every record that names it, not just the due one.
+ */
+function sessionRefKey(harness, id) {
+  const harnessPart = typeof harness === 'string' ? harness : '';
+  const idPart = typeof id === 'string' ? id : '';
+  return `${harnessPart}\u0000${idPart}`;
 }
 
 async function entryExists(target, statImpl) {
@@ -429,6 +448,24 @@ export async function sweepRecords({
   const actions = [];
   let due = 0;
 
+  // A session can be shared by several records (a follow-up round reuses the harness
+  // session of the round before it). BEFORE any due record acts, collect every session
+  // that a record which is NOT due (no finite eligibleAt yet, or later than `at`) or is
+  // explicitly kept still references: such a session must never be archived or deleted
+  // on behalf of an older record. The key is (harness, id) for every harness, not dsh only.
+  const stillReferenced = new Set();
+  for (const record of index.values()) {
+    const eligibleAt = record.eligibleAt;
+    const isDue = typeof eligibleAt === 'number' && Number.isFinite(eligibleAt) && eligibleAt <= at && record.keep !== true;
+    if (isDue) continue;
+    for (const session of record.sessions.values()) {
+      stillReferenced.add(sessionRefKey(session.harness, session.id));
+    }
+  }
+  // Within one sweep a session is acted on at most once: two records can both be due and
+  // name the same session, and a second delete/archive would be redundant.
+  const handledThisSweep = new Set();
+
   for (const record of index.values()) {
     const eligibleAt = record.eligibleAt;
     if (typeof eligibleAt !== 'number' || !Number.isFinite(eligibleAt)) continue;
@@ -447,8 +484,13 @@ export async function sweepRecords({
       const source = typeof session.source === 'string' ? session.source : '';
       if (!isActionable(session.state, failures, recordId, harness, id, deps.maxAttempts)) continue;
 
+      const refKey = sessionRefKey(harness, id);
       let outcome;
-      if (!recordFileExists) {
+      if (stillReferenced.has(refKey) || handledThisSweep.has(refKey)) {
+        // Either a kept/not-yet-due record still owns this session, or another due
+        // record already handled the very same session earlier in THIS sweep.
+        outcome = { action: actionForHarness(harness), state: 'skipped', note: NOTE_SESSION_STILL_REFERENCED };
+      } else if (!recordFileExists) {
         outcome = { action: 'skip', state: 'skipped', note: NOTE_RECORD_FILE_MISSING };
       } else {
         outcome = await executeSession({
@@ -459,6 +501,7 @@ export async function sweepRecords({
           dryRun: isDryRun,
           deps,
         });
+        handledThisSweep.add(refKey);
       }
       actions.push({
         recordId,

@@ -213,14 +213,41 @@ export function createBridgeClient({
    * The full result text of one owned bridge task, paged from offset 0 with
    * `limit: RESULT_PAGE_LIMIT` until `hasMore` is false or `maxChars` is reached. A
    * result cut short gets TRUNCATION_MARKER appended; a task with no text yields ''.
+   *
+   * When `attemptId` is given the read is PINNED to that round: every page request
+   * carries the attemptId and every returned page must echo exactly that attemptId. A
+   * page from another round aborts the read instead of splicing two rounds' text
+   * together. Without `attemptId` the request shape is byte-for-byte the old one.
    */
-  async function resultText(taskId, { maxChars = RESULT_TEXT_MAX_CHARS } = {}) {
+  async function resultText(taskId, { attemptId, maxChars = RESULT_TEXT_MAX_CHARS } = {}) {
+    if (attemptId !== undefined && attemptId !== null
+      && (typeof attemptId !== 'string' || attemptId.trim() === '')) {
+      throw new PeerPolicyError('PEER_ARGS_INVALID', 'attemptId must be a nonblank string when it is given', { field: 'attemptId' });
+    }
+    const pinned = typeof attemptId === 'string';
     const cap = Number.isFinite(maxChars) && maxChars >= 0 ? Math.floor(maxChars) : RESULT_TEXT_MAX_CHARS;
     let offset = 0;
     let collected = '';
     let truncated = false;
     for (;;) {
-      const page = await call('bridge_result', { taskId, offset, limit: RESULT_PAGE_LIMIT });
+      const args = { taskId, offset, limit: RESULT_PAGE_LIMIT };
+      if (pinned) args.attemptId = attemptId;
+      const page = await call('bridge_result', args);
+      if (pinned) {
+        const echoed = isObject(page) ? page.attemptId : undefined;
+        if (echoed !== attemptId) {
+          throw new PeerPolicyError(
+            'PEER_BRIDGE',
+            'bridge_result returned a page for a different attemptId than the requested round',
+            {
+              tool: 'bridge_result',
+              code: null,
+              attemptId,
+              returnedAttemptId: typeof echoed === 'string' && echoed !== '' ? echoed : null,
+            },
+          );
+        }
+      }
       const text = isObject(page) && typeof page.text === 'string' ? page.text : '';
       if (isObject(page) && page.totalChars === 0) return '';
       const remaining = cap - collected.length;

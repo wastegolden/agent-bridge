@@ -354,6 +354,40 @@ function renderChecks(checks) {
   return rows.join('\n');
 }
 
+/** Metadata kept on one line: a stored id must never be able to split a heading. */
+function oneLine(value) {
+  return inline(value).replace(/\r\n|\r|\n/g, ' ');
+}
+
+/**
+ * The ordered follow-up transcript of a multi-round bridge task: one section per round
+ * carrying its round number, attemptId and status, then its stored question and answer.
+ * Question and answer are fenced exactly like every other untrusted text.
+ */
+function renderBridgeRounds(rounds) {
+  const lines = ['#### 追问与回答'];
+  for (let index = 0; index < rounds.length; index += 1) {
+    const round = isObject(rounds[index]) ? rounds[index] : {};
+    const roundNumber = Number.isInteger(round.round) ? round.round : index;
+    const meta = [`attemptId=${oneLine(round.attemptId)}`];
+    if (text(round.followupId) !== '') meta.push(`followupId=${oneLine(round.followupId)}`);
+    meta.push(`状态=${oneLine(round.status)}`);
+    lines.push(
+      '',
+      `##### 第 ${roundNumber} 轮（${meta.join(' · ')}）`,
+      '',
+      '问题:',
+      '',
+      round.question === null || round.question === undefined ? RECORD_MISSING : fenceSafe(round.question),
+      '',
+      '回答:',
+      '',
+      round.resultText === null || round.resultText === undefined ? RECORD_MISSING : fenceSafe(round.resultText),
+    );
+  }
+  return lines.join('\n');
+}
+
 function renderBridgeTask(task) {
   const dossier = isObject(task.dossier) ? task.dossier : {};
   const request = isObject(dossier.request) ? dossier.request : {};
@@ -364,6 +398,9 @@ function renderBridgeTask(task) {
   const integration = isObject(dossier.integration) ? dossier.integration : {};
   const acknowledgement = isObject(dossier.acknowledgement) ? dossier.acknowledgement : {};
   const acceptance = Array.isArray(request.acceptance) ? request.acceptance : [];
+  // Only a task with MORE THAN ONE round is rendered as a follow-up transcript; a legacy
+  // (no `rounds`) and a single-round task keep the original single result section.
+  const rounds = Array.isArray(task.rounds) ? task.rounds.filter(isObject) : [];
 
   const lines = [
     `### ${inline(dossier.title)} (${inline(dossier.taskId)})`,
@@ -407,11 +444,17 @@ function renderBridgeTask(task) {
     '',
     `- 已接受: ${acknowledgement.accepted === true ? '是' : acknowledgement.accepted === false ? '否' : RECORD_MISSING}`,
     `- 工件状态: ${inline(acknowledgement.artifactState)}`,
-    '',
-    '#### 结果全文',
-    '',
-    task.resultText === null || task.resultText === undefined ? RECORD_MISSING : fenceSafe(task.resultText),
   ];
+  if (rounds.length > 1) {
+    lines.push('', renderBridgeRounds(rounds));
+  } else {
+    lines.push(
+      '',
+      '#### 结果全文',
+      '',
+      task.resultText === null || task.resultText === undefined ? RECORD_MISSING : fenceSafe(task.resultText),
+    );
+  }
   if (text(dossier.sessionId) !== '') lines.push('', `- 会话: ${dossier.sessionId}`);
   return lines.join('\n');
 }

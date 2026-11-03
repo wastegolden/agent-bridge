@@ -19,6 +19,12 @@
 // This module owns no policy of its own beyond that: it reuses src/peer/records.mjs for
 // project-root discovery, git exclusion, naming, retention maths, rendering, atomic
 // writing and the index.
+//
+// A bridge task with more than one follow-up round (`dossier.rounds.length > 1`) is
+// recorded as one ordered question/answer section per round: every round's text is read
+// back PINNED to its own attemptId, and the record identity includes the current attemptId
+// (`taskId@attemptId`) so a new round is a new record. A single-round or legacy task keeps
+// the old unpinned read and the exact old record identity.
 
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -248,6 +254,10 @@ export async function closeoutRootTask({
   }
 
   // --- 2. bridge tasks: each must be settled AND reviewed/acknowledged ------------
+  // A task that went through one or more follow-up rounds carries `dossier.rounds`
+  // (ascending; the last entry is the current round). Every round is read back pinned by
+  // its own attemptId, so the record can never mix the text of two rounds. A single-round
+  // (or legacy) dossier keeps exactly the old shape and the old unpinned read.
   const bridgeEntries = [];
   for (const taskId of parsed.bridgeTaskIds) {
     const dossier = await bridge.dossier(taskId);
@@ -258,13 +268,49 @@ export async function closeoutRootTask({
         'bridgeTaskIds',
       );
     }
-    const resultText = await bridge.resultText(taskId);
-    bridgeEntries.push({ taskId, dossier, resultText: typeof resultText === 'string' ? resultText : null });
+    const currentText = await bridge.resultText(taskId);
+    const entry = { taskId, dossier, resultText: typeof currentText === 'string' ? currentText : null };
+    const dossierRounds = Array.isArray(dossier.rounds) ? dossier.rounds : [];
+    if (dossierRounds.length > 1) {
+      if (typeof dossier.attemptId !== 'string' || dossier.attemptId.trim() === '') {
+        throw notReady(
+          `bridge task ${taskId} has ${dossierRounds.length} rounds but no current attemptId; its rounds cannot be pinned`,
+          'bridgeTaskIds',
+        );
+      }
+      const rounds = [];
+      for (let index = 0; index < dossierRounds.length; index += 1) {
+        const source = isObject(dossierRounds[index]) ? dossierRounds[index] : {};
+        if (typeof source.attemptId !== 'string' || source.attemptId.trim() === '') {
+          throw notReady(
+            `bridge task ${taskId} round ${Number.isInteger(source.round) ? source.round : index} has no attemptId; its text cannot be pinned`,
+            'bridgeTaskIds',
+          );
+        }
+        const roundText = await bridge.resultText(taskId, { attemptId: source.attemptId });
+        rounds.push({
+          round: Number.isInteger(source.round) ? source.round : index,
+          attemptId: source.attemptId,
+          followupId: typeof source.followupId === 'string' && source.followupId !== '' ? source.followupId : null,
+          question: typeof source.question === 'string' ? source.question : null,
+          status: typeof source.status === 'string' ? source.status : null,
+          resultText: typeof roundText === 'string' ? roundText : null,
+        });
+      }
+      entry.rounds = rounds;
+    }
+    bridgeEntries.push(entry);
   }
 
   // --- 3. deterministic identity + idempotent replay ------------------------------
+  // A multi-round task is identified by the CURRENT attempt as well as the task id, so
+  // closing out a new follow-up round creates a new record. A single-round task keeps
+  // the exact old hash input, so an already stored record is still reused.
+  const bridgeIdentity = bridgeEntries.map(({ taskId, dossier, rounds }) => (
+    Array.isArray(rounds) && rounds.length > 1 ? `${taskId}@${dossier.attemptId}` : taskId
+  ));
   const recordId = createHash('sha256')
-    .update(`${task}\n${[...parsed.bridgeTaskIds].sort().join(',')}\n${[...selectedJobIds].sort().join(',')}`, 'utf8')
+    .update(`${task}\n${bridgeIdentity.sort().join(',')}\n${[...selectedJobIds].sort().join(',')}`, 'utf8')
     .digest('hex')
     .slice(0, 16);
 
@@ -324,7 +370,9 @@ export async function closeoutRootTask({
     keep: parsed.keep,
     eligibleAt,
     findings: parsed.findings,
-    bridgeTasks: bridgeEntries.map(({ dossier, resultText }) => ({ dossier, resultText })),
+    bridgeTasks: bridgeEntries.map(({ dossier, resultText, rounds }) => (
+      rounds === undefined ? { dossier, resultText } : { dossier, resultText, rounds }
+    )),
     peerJobs: peerEntries.map(({ job, promptText, finalMessage }) => ({ job, promptText, finalMessage })),
   });
   const fileName = recordFileName({ createdAt: closedAt, title: parsed.title, rootTask: task });
