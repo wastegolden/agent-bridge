@@ -120,6 +120,12 @@ function stripped(task) {
   return body;
 }
 
+// node:sqlite returns rows with a null prototype, so `deepStrictEqual` against a plain
+// object fails even when every value matches. Normalize every row before comparing.
+function plainRows(rows) {
+  return rows.map(row => ({ ...row }));
+}
+
 function hostContext() {
   const registered = [];
   return {
@@ -180,10 +186,33 @@ test('v0 migration preserves every multi-round binding and result and keeps null
   assert.deepEqual(store.get(history.multiId).followups[1].boundAttempt, multi.followups[1].boundAttempt);
   assert.deepEqual(store.get(history.simpleId), { ...simple, submittedBy: null, via: null });
   assert.equal(store.get(history.simpleId).status, 'cancelled');
+  // Every migrated event survives with its seq and serialized body.
   assert.deepEqual(store.events(history.multiId), history.events.filter(event => event.taskId === history.multiId));
   assert.deepEqual(store.events(history.simpleId), history.events.filter(event => event.taskId === history.simpleId));
   assert.deepEqual(
-    store.db.prepare('SELECT submittedBy FROM tasks ORDER BY rowid').all().map(row => row.submittedBy),
+    history.tasks.flatMap(task => store.events(task.id, { limit: 1000 })).sort((left, right) => left.seq - right.seq),
+    history.events,
+    'every migrated event body, task and seq must be preserved',
+  );
+  // Every migrated row is checked, not just one body: SQL columns, the historical empty
+  // string namespace and the restored identity fields are all normalized first. Rows are
+  // keyed by task id because VACUUM/rowid numbering is not a contract.
+  assert.deepEqual(
+    Object.fromEntries(
+      plainRows(store.db.prepare('SELECT id,owner,submittedBy,idem,hash,body FROM tasks').all())
+        .map(row => [row.id, { ...row, body: JSON.parse(row.body) }]),
+    ),
+    Object.fromEntries(history.tasks.map(task => [task.id, {
+      id: task.id,
+      owner: OWNER,
+      submittedBy: '',
+      idem: task.packet.idempotencyKey,
+      hash: task.requestHash,
+      body: { ...stripped(task), submittedBy: null, via: null },
+    }])),
+  );
+  assert.deepEqual(
+    plainRows(store.db.prepare('SELECT submittedBy FROM tasks').all()).map(row => row.submittedBy),
     ['', ''],
   );
 
@@ -194,10 +223,24 @@ test('v0 migration preserves every multi-round binding and result and keeps null
   const snapshot = new DatabaseSync(path.join(backupDirectory, snapshots[0]), { readOnly: true });
   assert.equal(snapshot.prepare('PRAGMA user_version').get().user_version, 0);
   assert.equal(snapshot.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
-  assert.deepEqual(JSON.parse(snapshot.prepare('SELECT body FROM tasks WHERE id=?').get(history.multiId).body), stripped(multi));
   assert.deepEqual(
-    snapshot.prepare('SELECT seq,task_id,body FROM events ORDER BY seq').all(),
+    Object.fromEntries(
+      plainRows(snapshot.prepare('SELECT id,owner,idem,hash,body FROM tasks').all())
+        .map(row => [row.id, { ...row, body: JSON.parse(row.body) }]),
+    ),
+    Object.fromEntries(history.tasks.map(task => [task.id, {
+      id: task.id,
+      owner: OWNER,
+      idem: task.packet.idempotencyKey,
+      hash: task.requestHash,
+      body: stripped(task),
+    }])),
+    'the backup must hold every pre-migration task binding and body',
+  );
+  assert.deepEqual(
+    plainRows(snapshot.prepare('SELECT seq,task_id,body FROM events ORDER BY seq').all()),
     history.events.map(({ seq, ...body }) => ({ seq, task_id: body.taskId, body: JSON.stringify(body) })),
+    'the backup must hold every pre-migration event body and seq',
   );
   snapshot.close();
 
@@ -259,7 +302,8 @@ test('illegal identity/mount configuration refuses before mutating an existing v
     try {
       return {
         version: db.prepare('PRAGMA user_version').get().user_version,
-        bodies: db.prepare('SELECT body FROM tasks ORDER BY rowid').all().map(row => row.body),
+        rows: plainRows(db.prepare('SELECT id,owner,idem,hash,body FROM tasks ORDER BY rowid').all()),
+        events: plainRows(db.prepare('SELECT seq,task_id,body FROM events ORDER BY seq').all()),
       };
     } finally {
       db.close();

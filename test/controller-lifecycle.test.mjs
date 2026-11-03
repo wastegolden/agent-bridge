@@ -255,13 +255,23 @@ test('historical null ownership survives a real HTTP follow-up with replay, conf
   assert.equal(minted.followups.length, 1);
   assert.equal(minted.followups[0].boundAttempt.attemptId, a0);
   assert.equal(minted.followups[0].boundAttempt.sessionId, sessionId);
-  const firstOutcome = f.store.events(id).filter(event => event.type === 'task/override-result').at(-1);
-  const firstIntent = f.store.events(id).find(event => event.type === 'task/override' && event.operationId === firstOutcome.operationId);
+  const firstEvents = f.store.events(id, { limit: 1000 });
+  const firstOutcome = firstEvents.filter(event => event.type === 'task/override-result').at(-1);
+  assert.ok(firstOutcome, 'the authorized override persisted no outcome event');
+  const firstIntent = firstEvents.find(event => event.type === 'task/override' && event.operationId === firstOutcome.operationId);
   assert.equal(firstIntent.actor, 'operator');
   assert.equal(firstIntent.submittedBy, null);
+  assert.equal(firstIntent.via, null, 'a root request with no chain headers records via:null');
   assert.equal(firstIntent.attemptId, a0);
   assert.equal(firstOutcome.attemptId, a1);
-  assert.ok(f.store.events(id).indexOf(firstIntent) < f.store.events(id).indexOf(firstOutcome));
+  assert.equal(firstOutcome.outcome, 'returned');
+  assert.equal(firstOutcome.replay, false, 'the first authorized follow-up mints a new round, it is not a replay');
+  // One event snapshot + stable seq: the durable intent precedes its linked outcome.
+  const firstIntentIndex = firstEvents.indexOf(firstIntent);
+  const firstOutcomeIndex = firstEvents.indexOf(firstOutcome);
+  assert.ok(firstIntentIndex >= 0 && firstOutcomeIndex >= 0, 'the override intent/outcome pair must both be present');
+  assert.ok(firstIntentIndex < firstOutcomeIndex, `override intent index ${firstIntentIndex} must precede outcome index ${firstOutcomeIndex}`);
+  assert.ok(firstIntent.seq < firstOutcome.seq, `override intent seq ${firstIntent.seq} must precede outcome seq ${firstOutcome.seq}`);
 
   await until(() => f.service.get(id).status === 'running', 'follow-up never dispatched');
   const dispatched = f.store.get(id);
@@ -289,6 +299,7 @@ test('historical null ownership survives a real HTTP follow-up with replay, conf
   const replayIntent = f.store.events(id).find(event => event.type === 'task/override' && event.operationId === replayOutcome.operationId);
   assert.equal(replayIntent.actor, 'operator');
   assert.equal(replayIntent.submittedBy, null);
+  assert.deepEqual(replayIntent.via, { chain: ['dsh'], rootTask: null }, 'the override audit records this request via, not the first submission via');
   assert.equal(replayOutcome.replay, true);
   assert.equal(f.store.get(id).submittedBy, null);
 

@@ -32,16 +32,16 @@ import { digest, validatePacket } from '../src/contracts.mjs';
 // Contract section 10: every test temporary directory lives outside the worktree.
 const TEMP_ROOT = 'F:/temp/agent-bridge-upstream';
 
-const ROSTER = [
+// The roster every fixture configures. `legacy` is a real controller ID; the legacy
+// administrator row reconfigures the SAME id with admin:true instead of inventing a
+// differently named administrator principal (contract section 2).
+const BASE_ROSTER = [
   { id: 'claude-code', admin: false, token: `claude-code-test-${'a'.repeat(40)}` },
   { id: 'codex', admin: false, token: `codex-test-${'b'.repeat(40)}` },
   { id: 'operator', admin: true, token: `operator-test-${'c'.repeat(40)}` },
   { id: 'legacy', admin: false, token: `legacy-test-${'d'.repeat(40)}` },
-  { id: 'legacy-admin', admin: true, token: `legacy-admin-test-${'e'.repeat(36)}` },
 ];
-const TOKEN = Object.fromEntries(ROSTER.map(entry => [entry.id, entry.token]));
-const ADMIN = Object.fromEntries(ROSTER.map(entry => [entry.id, entry.admin]));
-const IDS = ROSTER.map(entry => entry.id).sort();
+const TOKEN = Object.fromEntries(BASE_ROSTER.map(entry => [entry.id, entry.token]));
 
 const TASK_READS = ['bridge_check', 'bridge_result', 'bridge_dossier'];
 const ALL_READS = [...TASK_READS, 'bridge_list', 'bridge_models', 'bridge_capabilities'];
@@ -77,11 +77,11 @@ function packet(directory, key, extra = {}) {
   };
 }
 
-function fixture(t) {
+function fixture(t, roster = BASE_ROSTER) {
   fs.mkdirSync(TEMP_ROOT, { recursive: true });
   const directory = fs.mkdtempSync(path.join(TEMP_ROOT, 'controller-permissions-'));
   const store = new TaskStore({ directory, ownerId: 'owner' });
-  const counts = { adapter: 0, preflight: 0, workspace: 0, project: 0 };
+  const counts = { adapter: 0, preflight: 0, workspace: 0, project: 0, followup: 0, reconsider: 0 };
   const catalog = [{ provider: 'deepseek-official', models: [{ id: 'deepseek-flash' }] }];
   const adapter = {
     models: async () => { counts.adapter += 1; return catalog; },
@@ -90,8 +90,8 @@ function fixture(t) {
     inspect: async () => { counts.adapter += 1; return { status: 'unknown', stopConfirmed: false }; },
     archive: async task => { counts.adapter += 1; return { archived: true, uiHidden: true, sessionId: task.sessionId ?? null }; },
     cleanup: async () => { counts.adapter += 1; return { cleaned: true }; },
-    followup: async () => { counts.adapter += 1; },
-    reconsider: async () => { counts.adapter += 1; },
+    followup: async () => { counts.adapter += 1; counts.followup += 1; },
+    reconsider: async () => { counts.adapter += 1; counts.reconsider += 1; },
   };
   const service = new BridgeService({ store, adapter });
   // The matrix exercises authorization, not dispatch: no drain may run a model turn.
@@ -125,7 +125,7 @@ function fixture(t) {
     onAnySettled: () => {},
     requestProjectCancel: async () => ({ accepted: true, stopConfirmed: true }),
   };
-  const controllers = ROSTER.map(entry => {
+  const controllers = roster.map(entry => {
     const tokenFile = path.join(directory, `${entry.id}.token`);
     fs.writeFileSync(tokenFile, entry.token);
     return { id: entry.id, tokenFile, admin: entry.admin };
@@ -136,7 +136,7 @@ function fixture(t) {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { directory, store, service, counts, marker, registry, controllers };
+  return { directory, store, service, counts, marker, registry, controllers, ids: roster.map(entry => entry.id).sort() };
 }
 
 async function serve(t, f) {
@@ -284,17 +284,29 @@ function headersOf(row) {
 
 // One row of the frozen section 9 matrix. Each row runs against its own fresh real
 // store/server so concurrent rows cannot share tasks, counters or worktree markers.
+// The legacy administrator is the REAL id `legacy` configured admin:true, never a
+// differently named administrator principal.
 const ROWS = [
-  { id: 'claude-code', admin: false, via: null },
-  { id: 'codex', admin: false, via: null },
-  { id: 'operator', admin: true, via: null },
-  { id: 'legacy', admin: false, via: null },
-  { id: 'legacy-admin', admin: true, via: null },
+  { label: 'claude-code', id: 'claude-code', admin: false, via: null },
+  { label: 'codex', id: 'codex', admin: false, via: null },
+  { label: 'operator admin', id: 'operator', admin: true, via: null },
+  { label: 'legacy ordinary', id: 'legacy', admin: false, via: null },
+  { label: 'legacy admin (id legacy, admin:true)', id: 'legacy', admin: true, via: null },
   // Delegate inheritance: the token authenticates the ROOT controller, while the
-  // chain records the client-declared submission provenance (contract R1).
-  { id: 'claude-code', admin: false, via: { chain: ['claude-code', 'codex'], rootTask: 'delegate-root' } },
-  { id: 'codex', admin: false, via: { chain: ['codex', 'claude-code'], rootTask: 'delegate-root' } },
+  // chain records the client-declared submission provenance (contract R1). Both
+  // directions are exercised: Claude->Codex and Codex->Claude.
+  { label: 'delegate Claude->Codex', id: 'claude-code', admin: false, via: { chain: ['claude-code', 'codex'], rootTask: 'delegate-root' } },
+  { label: 'delegate Codex->Claude', id: 'codex', admin: false, via: { chain: ['codex', 'claude-code'], rootTask: 'delegate-root' } },
 ];
+
+function rosterFor(row) {
+  return BASE_ROSTER.map(entry => ({
+    ...entry,
+    // `operator` is always the role administrator; `legacy` is admin only in the legacy
+    // administrator row, which proves the real id can be configured either way.
+    admin: entry.id === 'operator' ? true : entry.id === 'legacy' ? row.id === 'legacy' && row.admin === true : false,
+  }));
+}
 
 function ownCategory(category) {
   return category === 'own' || category === 'internal-own';
@@ -307,12 +319,28 @@ function expectedPermission(row, category, supplied) {
   return supplied ? null : 'OVERRIDE_REASON_REQUIRED';
 }
 
-function assertPermission(response, code) {
+// Contract section 4 fixes a field/expected pair per permission code. Keep the exact
+// pair, not just the code, so a wrong field cannot ride along with a right code.
+const PERMISSION_DETAILS = {
+  TASK_NOT_OWNED: { field: 'taskId', expected: 'task owned by authenticated controller' },
+  OVERRIDE_NOT_PERMITTED: { field: 'override', expected: 'admin override on a mutate tool' },
+  OVERRIDE_REASON_REQUIRED: { field: 'override.reason', expected: 'nonblank string, maximum 500 characters' },
+};
+// Both INVALID_ARGUMENTS override shapes are explicit: a malformed override object names
+// `override`, while a malformed reason names `override.reason`.
+const INVALID_OVERRIDE_DETAILS = {
+  override: { field: 'override', expected: 'object with only reason' },
+  'override.reason': { field: 'override.reason', expected: 'nonblank string, maximum 500 characters' },
+};
+
+function assertPermission(response, code, details = PERMISSION_DETAILS[code]) {
+  assert.ok(details, `no expected field/expected registered for ${code}`);
   const outcome = outcomeOf(response);
   assert.equal(response.status, 200, `expected HTTP 200 for ${code}`);
   assert.equal(outcome.error?.code, code, JSON.stringify(outcome));
-  assert.equal(outcome.error.details.field, code === 'TASK_NOT_OWNED' ? 'taskId' : code === 'OVERRIDE_REASON_REQUIRED' ? 'override.reason' : 'override');
-  assert.ok(outcome.error.details.expected.length <= 120);
+  assert.deepEqual(outcome.error.details, details, `${code} must report its contract field/expected`);
+  assert.equal(typeof outcome.error.message, 'string');
+  assert.ok(outcome.error.details.expected.length <= 120, `${code} details must stay bounded`);
 }
 
 function assertAudit(f, task, response, row, tool) {
@@ -328,6 +356,9 @@ function assertAudit(f, task, response, row, tool) {
   assert.equal(intent.reason, 'Inspect task');
   assert.deepEqual(intent.via, row.via ?? null);
   assert.equal(intent.revision, f.store.get(task.id).revision);
+  // One snapshot + stable seq: the durable intent must precede its own outcome.
+  assert.ok(intent.seq < outcome.seq, `${tool} override intent seq ${intent.seq} did not precede outcome seq ${outcome.seq}`);
+  assert.ok(events.indexOf(intent) < events.indexOf(outcome), `${tool} override events are out of order`);
   assert.equal(outcome?.type, 'task/override-result');
   assert.equal(outcome.operationId, intent.operationId);
   assert.equal(outcome.attemptId, f.store.get(task.id).attemptId);
@@ -349,6 +380,7 @@ function assertAllowedMutation(f, tool, task, before, response) {
   if (tool === 'bridge_cleanup') {
     assert.equal(result.value.dryRun, true);
     assert.equal(result.value.taskId, task.id);
+    assert.equal(typeof result.value.eligible, 'boolean', 'cleanup dry-run must compute the retention decision');
     return;
   }
   if (tool === 'bridge_pause' || tool === 'bridge_resume') {
@@ -372,16 +404,69 @@ function assertAllowedMutation(f, tool, task, before, response) {
   );
 }
 
+// Business evidence must not be satisfied by the override audit events themselves: the
+// first authorized override on a fresh foreign/historical/internal target has to show a
+// real business effect (state, business event, or a host/workspace/project call count).
+function businessEvents(events) {
+  return events.filter(event => event.type !== 'task/override' && event.type !== 'task/override-result');
+}
+
+function assertFreshOverride(f, tool, task, before, response) {
+  const result = outcomeOf(response);
+  assert.equal(result.error, undefined, `${tool} authorized override must reach its business path: ${JSON.stringify(result.error)}`);
+  const after = targetSnapshot(f, task);
+  const beforeBusiness = businessEvents(before.events);
+  const afterBusiness = businessEvents(after.events);
+  if (tool === 'bridge_cleanup') {
+    assert.equal(result.value.dryRun, true);
+    assert.equal(result.value.taskId, task.id);
+    assert.equal(typeof result.value.eligible, 'boolean', 'cleanup dry-run must compute the retention decision');
+    return result;
+  }
+  if (tool === 'bridge_pause' || tool === 'bridge_resume') {
+    assert.ok(after.counts.project > before.counts.project, `${tool} override did not reach the project runtime`);
+    assert.equal(result.value[tool === 'bridge_pause' ? 'pause' : 'resume'].accepted, true);
+    return result;
+  }
+  if (tool === 'bridge_reconcile') {
+    assert.ok(after.counts.adapter > before.counts.adapter, 'reconcile override did not inspect the host');
+    assert.equal(result.value.observation.status, 'unknown');
+    return result;
+  }
+  if (tool.startsWith('bridge_workspace_')) {
+    assert.ok(after.counts.workspace > before.counts.workspace, `${tool} override did not reach the workspace manager`);
+    assert.notEqual(after.marker, before.marker);
+    return result;
+  }
+  assert.ok(
+    digest(f.store.get(task.id)) !== digest(before.body)
+      || afterBusiness.length > beforeBusiness.length
+      || after.counts.adapter > before.counts.adapter,
+    `${tool} authorized override produced no business state or call-count effect`,
+  );
+  return result;
+}
+
+function roundsOf(task, key) {
+  return Array.isArray(task[key]) ? task[key].length : 0;
+}
+
 for (const [index, row] of ROWS.entries()) {
-  test(`section 9 matrix row ${index + 1}: ${row.id} admin=${row.admin} delegate=${Boolean(row.via)}`, async t => {
-    const f = fixture(t);
+  test(`section 9 matrix row ${index + 1}: ${row.label}`, async t => {
+    const roster = rosterFor(row);
+    const f = fixture(t, roster);
     const request = await serve(t, f);
     const headers = headersOf(row);
     const principal = { id: row.id, admin: row.admin };
+    const foreignId = foreignOf(row.id);
+    // The legacy administrator row is the real controller id `legacy` with admin:true;
+    // every other row keeps that same id as an ordinary principal.
+    assert.equal(f.controllers.find(controller => controller.id === 'legacy').admin, row.id === 'legacy' ? row.admin : false);
+    assert.equal(f.controllers.find(controller => controller.id === 'operator').admin, true);
     const seed = (submittedBy, key, extra = {}) => f.store.submit(validatePacket(packet(f.directory, key, extra)), { submittedBy, via: null }).task;
     const parents = {
       own: seed(row.id, `parent-own-${index}`),
-      foreign: seed(foreignOf(row.id), `parent-foreign-${index}`),
+      foreign: seed(foreignId, `parent-foreign-${index}`),
       null: seed(null, `parent-null-${index}`),
     };
     let key = 0;
@@ -392,9 +477,23 @@ for (const [index, row] of ROWS.entries()) {
         return f.store.submit(validatePacket(packet(f.directory, `internal-${index}-${key}`, { parentTaskId: parent.id })), { submittedBy: parent.submittedBy, via: parent.via }).task;
       }
       return seed(
-        category === 'own' ? row.id : category === 'historical' ? null : foreignOf(row.id),
+        category === 'own' ? row.id : category === 'historical' ? null : foreignId,
         `target-${index}-${state}-${key}`,
       );
+    };
+
+    // Completion accounting: fail-fast must not let an omitted cell look proven. Every
+    // dimension is counted and asserted against the frozen matrix sizes at the end.
+    const completion = {
+      taskReads: 0, taskReadDenials: 0, globalReads: 0, globalReadDenials: 0, listFilters: 0,
+      mutateCells: 0, submitCells: 0,
+      byCategory: Object.fromEntries(CATEGORIES.map(category => [category, 0])),
+      byTool: Object.fromEntries(MUTATES.map(tool => [tool, 0])),
+    };
+    const coverMutate = (tool, category) => {
+      completion.mutateCells += 1;
+      completion.byTool[tool] += 1;
+      completion.byCategory[category] += 1;
     };
 
     // Read columns: every read tool is open to every authenticated principal; an
@@ -412,10 +511,47 @@ for (const [index, row] of ROWS.entries()) {
         assert.equal(value.submittedBy, target.submittedBy);
         assert.deepEqual(value.via, target.via);
         assert.deepEqual(targetSnapshot(f, target), before, `${tool} read changed state`);
+        completion.taskReads += 1;
         const beforeDenied = targetSnapshot(f, target);
         assertPermission(await request(tool, { ...argsFor(tool, target, f.directory), override: OVERRIDE }, { id: row.id, headers }), 'OVERRIDE_NOT_PERMITTED');
         assert.deepEqual(targetSnapshot(f, target), beforeDenied, `${tool} read override denial changed state`);
+        completion.taskReadDenials += 1;
       }
+    }
+
+    // Non-target read tools: always readable, but an override on any read is P.
+    for (const tool of ['bridge_list', 'bridge_models', 'bridge_capabilities']) {
+      const allowed = await request(tool, {}, { id: row.id, headers });
+      assert.equal(allowed.status, 200);
+      assert.equal(outcomeOf(allowed).error, undefined);
+      if (tool === 'bridge_capabilities') {
+        const value = outcomeOf(allowed).value;
+        assert.equal(value.existing, true);
+        assert.equal(value.controllerIdentity.self, principal.id);
+        assert.equal(value.controllerIdentity.admin, principal.admin);
+        assert.deepEqual(value.controllerIdentity.controllers, f.ids);
+      }
+      const beforeDenied = globalSnapshot(f);
+      assertPermission(await request(tool, { override: OVERRIDE }, { id: row.id, headers }), 'OVERRIDE_NOT_PERMITTED');
+      assert.deepEqual(globalSnapshot(f), beforeDenied);
+      completion.globalReads += 1;
+      completion.globalReadDenials += 1;
+    }
+
+    // bridge_list.submittedBy: omitted, own, foreign and historical are all readable,
+    // and an effective filter returns only that namespace.
+    const listedAll = outcomeOf(await request('bridge_list', { includeArchived: true }, { id: row.id, headers }));
+    assert.equal(listedAll.error, undefined);
+    assert.ok(listedAll.value.tasks.some(task => task.submittedBy === row.id), 'list omitted filter lost the own principal');
+    assert.ok(listedAll.value.tasks.some(task => task.submittedBy === foreignId), 'list omitted filter lost the foreign principal');
+    assert.ok(listedAll.value.tasks.some(task => task.submittedBy === null), 'list omitted filter lost historical ownership');
+    completion.listFilters += 1;
+    for (const [label, filter] of [[row.id, row.id], [foreignId, foreignId], ['historical', null]]) {
+      const listed = outcomeOf(await request('bridge_list', { submittedBy: filter, includeArchived: true }, { id: row.id, headers }));
+      assert.equal(listed.error, undefined, `bridge_list submittedBy=${label} refused`);
+      assert.ok(listed.value.tasks.length > 0, `bridge_list submittedBy=${label} returned no task`);
+      assert.ok(listed.value.tasks.every(task => task.submittedBy === filter), `bridge_list submittedBy=${label} leaked another identity`);
+      completion.listFilters += 1;
     }
 
     // Mutate columns: own / foreign / historical / internal {own,foreign,null} ×
@@ -433,36 +569,76 @@ for (const [index, row] of ROWS.entries()) {
           if (expected) {
             assertPermission(response, expected);
             assert.deepEqual(targetSnapshot(f, target), before, `${tool} denial left observable changes`);
+            coverMutate(tool, category);
             continue;
           }
           if (!supplied) {
+            // Ordinary allowed mutation: it must reach the real business seam and leave
+            // a real state/event/call-count effect, not just a permission decision.
             assertAllowedMutation(f, tool, target, before, response);
+            coverMutate(tool, category);
             continue;
           }
           assert.equal(response.status, 200);
           const { outcome } = assertAudit(f, target, response, row, tool);
-          if (tool === 'bridge_followup') assert.equal(outcome.replay, true, 'the second admin follow-up is the same request replay');
-          if (tool === 'bridge_clarify') assert.equal(outcome.replay, true);
           assert.equal(PERMISSION_CODES.has(outcomeOf(response).error?.code), false);
+          if (ownCategory(category)) {
+            // The own category already had its ordinary allowed request above, so this
+            // is the second authorized request: prove a true replay where the tool has
+            // one, and retain the real business gate everywhere else.
+            if (tool === 'bridge_followup') {
+              const replay = outcomeOf(response);
+              assert.equal(replay.error, undefined);
+              assert.equal(replay.value.followup.replay, true, 'the admin own override is the same follow-up replay');
+              assert.equal(outcome.replay, true);
+              assert.equal(replay.value.followup.attemptId, before.body.attemptId);
+              assert.equal(f.store.get(target.id).attemptId, before.body.attemptId, 'a follow-up replay must not mint an attempt');
+              assert.equal(roundsOf(f.store.get(target.id), 'followups'), roundsOf(before.body, 'followups'), 'a follow-up replay must not mint a round');
+            } else if (tool === 'bridge_clarify') {
+              const replay = outcomeOf(response);
+              assert.equal(replay.error, undefined);
+              assert.equal(replay.value.clarificationReplay, true, 'the admin own override is the same clarification replay');
+              assert.equal(outcome.replay, true);
+              assert.equal(f.store.get(target.id).attemptId, before.body.attemptId, 'a clarification replay must not mint an attempt');
+              assert.equal(roundsOf(f.store.get(target.id), 'clarifications'), roundsOf(before.body, 'clarifications'), 'a clarification replay must not mint a clarification');
+            } else if (tool === 'bridge_approve') {
+              // The earlier ordinary approval already consumed the awaiting task: the
+              // second authorized request still enters the business gate and fails
+              // there, with the failure recorded in its own audit outcome.
+              assert.equal(outcome.outcome, 'threw');
+              assert.equal(outcome.code, 'APPROVAL_CONFLICT');
+              assert.equal(outcomeOf(response).error?.code, 'APPROVAL_CONFLICT');
+            } else {
+              assert.equal(outcome.outcome, 'returned', `${tool} second authorized request unexpectedly failed: ${JSON.stringify(outcomeOf(response).error)}`);
+              assert.equal(outcomeOf(response).error, undefined);
+            }
+          } else {
+            // First authorized request on a fresh foreign/historical/internal target:
+            // prove real business invocation + state/call-count effect linked to audit.
+            assertFreshOverride(f, tool, target, before, response);
+            // The linked outcome event records the applicable business result fields.
+            if (tool === 'bridge_archive') assert.equal(outcome.archived, true, 'archive outcome must record the business result');
+            if (tool === 'bridge_pause' || tool === 'bridge_resume') assert.equal(outcome.accepted, true, `${tool} outcome must record the accepted request`);
+            if (tool === 'bridge_cleanup') assert.equal(typeof outcome.eligible, 'boolean', 'cleanup dry-run outcome must record the retention decision');
+            if (tool === 'bridge_followup') {
+              const first = outcomeOf(response);
+              assert.equal(first.value.followup.replay, false, 'the first authorized follow-up is a new round, not a replay');
+              assert.equal(outcome.replay, false);
+              assert.notEqual(first.value.followup.attemptId, before.body.attemptId, 'a first follow-up must mint a new attempt');
+              assert.equal(roundsOf(f.store.get(target.id), 'followups'), roundsOf(before.body, 'followups') + 1, 'a first follow-up must mint exactly one round');
+              assert.equal(f.store.get(target.id).attemptId, first.value.followup.attemptId);
+            }
+            if (tool === 'bridge_clarify') {
+              const first = outcomeOf(response);
+              assert.equal(first.value.clarificationReplay, undefined, 'a first clarification is not a replay');
+              assert.equal(outcome.replay, undefined);
+              assert.notEqual(f.store.get(target.id).attemptId, before.body.attemptId, 'a first clarification must mint a new attempt');
+              assert.equal(roundsOf(f.store.get(target.id), 'clarifications'), roundsOf(before.body, 'clarifications') + 1, 'a first clarification must mint exactly one clarification');
+            }
+          }
+          coverMutate(tool, category);
         }
       }
-    }
-
-    // Non-target read tools: always readable, but an override on any read is P.
-    for (const tool of ['bridge_list', 'bridge_models', 'bridge_capabilities']) {
-      const allowed = await request(tool, {}, { id: row.id, headers });
-      assert.equal(allowed.status, 200);
-      assert.equal(outcomeOf(allowed).error, undefined);
-      if (tool === 'bridge_capabilities') {
-        const value = outcomeOf(allowed).value;
-        assert.equal(value.existing, true);
-        assert.equal(value.controllerIdentity.self, principal.id);
-        assert.equal(value.controllerIdentity.admin, principal.admin);
-        assert.deepEqual(value.controllerIdentity.controllers, IDS);
-      }
-      const beforeDenied = globalSnapshot(f);
-      assertPermission(await request(tool, { override: OVERRIDE }, { id: row.id, headers }), 'OVERRIDE_NOT_PERMITTED');
-      assert.deepEqual(globalSnapshot(f), beforeDenied);
     }
 
     // Submit column: every authenticated principal may submit and the task is bound to
@@ -475,9 +651,29 @@ for (const [index, row] of ROWS.entries()) {
     assert.equal(created.value.submittedBy, principal.id);
     assert.deepEqual(created.value.via, row.via ?? null);
     assert.equal(f.store.get(created.value.id).submittedBy, principal.id);
+    completion.submitCells += 1;
     const beforeDeniedSubmit = globalSnapshot(f);
     assertPermission(await request('bridge_submit', { packet: packet(f.directory, `${keyName}-denied`), override: OVERRIDE }, { id: row.id, headers }), 'OVERRIDE_NOT_PERMITTED');
     assert.deepEqual(globalSnapshot(f), beforeDeniedSubmit);
+    completion.submitCells += 1;
+
+    // The matrix authorizes and mutates records but never runs a model turn: round
+    // counts move while the real host dispatch counters stay at zero.
+    assert.equal(f.counts.followup, 0, 'no matrix mutation may dispatch a follow-up turn');
+    assert.equal(f.counts.reconsider, 0, 'no matrix mutation may dispatch a clarification turn');
+
+    // Completion evidence: no cell can be silently omitted without failing the row.
+    assert.equal(completion.taskReads, CATEGORIES.length * TASK_READS.length);
+    assert.equal(completion.taskReadDenials, CATEGORIES.length * TASK_READS.length);
+    assert.equal(completion.globalReads, 3);
+    assert.equal(completion.globalReadDenials, 3);
+    assert.equal(completion.listFilters, 4);
+    assert.equal(completion.mutateCells, CATEGORIES.length * MUTATES.length * 2);
+    assert.equal(completion.submitCells, 2);
+    for (const category of CATEGORIES) assert.equal(completion.byCategory[category], MUTATES.length * 2, `category ${category} incomplete`);
+    for (const tool of MUTATES) assert.equal(completion.byTool[tool], CATEGORIES.length * 2, `tool ${tool} incomplete`);
+    assert.equal(new Set([...TASK_READS, ...['bridge_list', 'bridge_models', 'bridge_capabilities']]).size, 6);
+    t.diagnostic(`row ${row.label}: ${completion.taskReads} task-reads + ${completion.taskReadDenials} task-read denials + ${completion.globalReads} global reads + ${completion.globalReadDenials} global denials + ${completion.listFilters} list filters + ${completion.mutateCells} mutate cells (13 tools x 6 categories x +/-) + ${completion.submitCells} submit cells; controllers=${f.ids.join(',')}; admin=${row.admin}; via=${JSON.stringify(row.via)}`);
   });
 }
 
@@ -488,8 +684,19 @@ test('unknown credentials cover every tool, ownership cell and override variant 
   const own = seed('codex', 'own');
   const foreign = seed('claude-code', 'foreign');
   const historical = seed(null, 'historical');
-  for (const task of [own, foreign, historical]) applyState(f, task, 'completed');
-  const targets = [own, foreign, historical];
+  const parents = [own, foreign, historical];
+  // Derived internal targets add the parent-own / parent-foreign / parent-null ownership
+  // variants; an unknown token must be refused for those too, not only the three roots.
+  const targets = [
+    ...parents,
+    ...parents.map((parent, index) => f.store.submit(
+      validatePacket(packet(f.directory, `internal-unknown-${index}`, { parentTaskId: parent.id })),
+      { submittedBy: parent.submittedBy, via: parent.via },
+    ).task),
+  ];
+  for (const task of targets) applyState(f, task, 'completed');
+  let cells = 0;
+  const byTool = Object.fromEntries(TOOLS.map(tool => [tool.name, 0]));
   for (const tool of TOOLS) {
     for (const target of targets) {
       for (const supplied of [false, true]) {
@@ -499,9 +706,14 @@ test('unknown credentials cover every tool, ownership cell and override variant 
         const response = await request(tool.name, args, { token: 'unknown-token' + 'z'.repeat(32), headers: { 'X-Agent-Bridge-Root-Task': 'invalid-alone' } });
         assert.deepEqual(response, { status: 401, body: { error: 'unauthorized' } }, tool.name);
         assert.deepEqual(globalSnapshot(f), before);
+        cells += 1;
+        byTool[tool.name] += 1;
       }
     }
   }
+  assert.equal(targets.length, 6, 'unknown-token coverage must include the derived ownership variants');
+  assert.equal(cells, TOOLS.length * targets.length * 2);
+  for (const tool of TOOLS) assert.equal(byTool[tool.name], targets.length * 2, `${tool.name} unknown-token cell omitted`);
 });
 
 test('malformed, empty, mistyped, extra-key and overlong overrides are validated before target reads', async t => {
@@ -511,26 +723,26 @@ test('malformed, empty, mistyped, extra-key and overlong overrides are validated
   const foreign = f.store.submit(validatePacket(packet(f.directory, 'override-foreign')), { submittedBy: 'codex', via: null }).task;
   for (const task of [own, foreign]) applyState(f, task, 'completed');
   const cases = [
-    [{}, 'OVERRIDE_REASON_REQUIRED'],
-    [{ reason: '' }, 'OVERRIDE_REASON_REQUIRED'],
-    [{ reason: ' \t ' }, 'OVERRIDE_REASON_REQUIRED'],
-    [{ reason: 5 }, 'INVALID_ARGUMENTS'],
-    [{ reason: 'x'.repeat(501) }, 'INVALID_ARGUMENTS'],
-    [{ reason: 'ok', extra: true }, 'INVALID_ARGUMENTS'],
-    [null, 'INVALID_ARGUMENTS'],
-    [[], 'INVALID_ARGUMENTS'],
-    ['reason', 'INVALID_ARGUMENTS'],
-    [1, 'INVALID_ARGUMENTS'],
+    [{}, 'OVERRIDE_REASON_REQUIRED', INVALID_OVERRIDE_DETAILS['override.reason']],
+    [{ reason: '' }, 'OVERRIDE_REASON_REQUIRED', INVALID_OVERRIDE_DETAILS['override.reason']],
+    [{ reason: ' \t ' }, 'OVERRIDE_REASON_REQUIRED', INVALID_OVERRIDE_DETAILS['override.reason']],
+    [{ reason: 5 }, 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS['override.reason']],
+    [{ reason: 'x'.repeat(501) }, 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS['override.reason']],
+    [{ reason: 'ok', extra: true }, 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS.override],
+    [null, 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS.override],
+    [[], 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS.override],
+    ['reason', 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS.override],
+    [1, 'INVALID_ARGUMENTS', INVALID_OVERRIDE_DETAILS.override],
   ];
-  for (const [value, code] of cases) {
+  for (const [value, code, details] of cases) {
     const before = targetSnapshot(f, own);
     const response = await request('bridge_cancel', { taskId: own.id, override: value }, { id: 'operator' });
-    assertPermission(response, code);
+    assertPermission(response, code, details);
     assert.deepEqual(targetSnapshot(f, own), before, `invalid override ${JSON.stringify(value)} changed state`);
     // Non-admins are refused as P for ANY override shape, including malformed ones.
     assertPermission(await request('bridge_cancel', { taskId: own.id, override: value }, { id: 'codex' }), 'OVERRIDE_NOT_PERMITTED');
     // Override validation precedes the target read, so a missing task keeps the same code.
-    assertPermission(await request('bridge_cancel', { taskId: 'missing', override: value }, { id: 'operator' }), code);
+    assertPermission(await request('bridge_cancel', { taskId: 'missing', override: value }, { id: 'operator' }), code, details);
   }
   // A read or submit carrying an override is P even for an administrator.
   assertPermission(await request('bridge_result', { taskId: own.id, override: {} }, { id: 'operator' }), 'OVERRIDE_NOT_PERMITTED');
