@@ -1,10 +1,22 @@
 {
   "mcpServers": {
     "dsh_project": {
-      "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
-      "bearer_token_env_var": "DSH_MCP_TOKEN",
+      "command": "node",
+      "args": ["./bin/bridge.mjs"],
       "tool_timeout_sec": 75,
-      "default_tools_approval_mode": "approve"
+      "default_tools_approval_mode": "approve",
+      "env_vars": [
+        "DSH_MCP_TOKEN",
+        "DSH_BRIDGE_CREDENTIAL_FILE",
+        "DSH_BRIDGE_DELEGATED",
+        "DSH_BRIDGE_DISABLED",
+        "DSH_BRIDGE_URL",
+        "DSH_BRIDGE_WATCHDOG_CONFIG",
+        "AGENT_BRIDGE_CHAIN",
+        "AGENT_BRIDGE_ROOT_TASK",
+        "AGENT_BRIDGE_MAX_DEPTH",
+        "AGENT_BRIDGE_MAX_DELEGATE_DEPTH"
+      ]
     },
     "agent_peer": {
       "command": "node",
@@ -18,6 +30,11 @@
         "AGENT_PEER_CONFIG": ""
       },
       "env_vars": [
+        "DSH_MCP_TOKEN",
+        "DSH_BRIDGE_CREDENTIAL_FILE",
+        "DSH_BRIDGE_DELEGATED",
+        "DSH_BRIDGE_DISABLED",
+        "DSH_BRIDGE_URL",
         "AGENT_BRIDGE_CHAIN",
         "AGENT_BRIDGE_MAX_DEPTH",
         "AGENT_BRIDGE_MAX_DELEGATE_DEPTH",

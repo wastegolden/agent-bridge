@@ -18,7 +18,11 @@
       "args": ["${CLAUDE_PLUGIN_ROOT}/bin/peer-mcp.mjs"],
       "env": {
         "AGENT_BRIDGE_SELF": "claude-code",
-        "AGENT_PEER_CONFIG": "${user_config.peer_config}"
+        "AGENT_PEER_CONFIG": "${user_config.peer_config}",
+        "DSH_MCP_TOKEN": "${DSH_MCP_TOKEN:-}",
+        "DSH_BRIDGE_CREDENTIAL_FILE": "${DSH_BRIDGE_CREDENTIAL_FILE:-}",
+        "DSH_BRIDGE_DELEGATED": "${DSH_BRIDGE_DELEGATED:-}",
+        "DSH_BRIDGE_DISABLED": "${DSH_BRIDGE_DISABLED:-}"
       }
     }
   },

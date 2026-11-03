@@ -677,9 +677,9 @@ function carrierHarness({ responses, env = {}, watchdogEnabled = true, spawned =
   const stdout = { write: (chunk) => { writes.push(chunk); return true; } };
   const carrier = createCarrier({
     stdout,
-    env,
-    // The missing credential path yields no token; the REAL config file (when opted in) is
-    // read from disk so the harness exercises the actual loader.
+    env: { DSH_MCP_TOKEN: 'watchdog-carrier-test-token', ...env },
+    // Transport fixtures have a credential; the real opt-in watchdog config is read
+    // from disk so the harness still exercises the actual loader.
     credentialFile: path.join(tempDir('dsh-carrier-token-'), 'missing-token'),
     readFileImpl: async (value) => fs.readFileSync(value, 'utf8'),
     fetchImpl: async () => queue.shift(),

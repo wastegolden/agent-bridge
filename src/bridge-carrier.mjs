@@ -22,6 +22,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
+import { bridgeViaHeaders, resolveBridgeCredential } from './bridge-credentials.mjs';
 import { receiptFilePath } from './watchdog-receipts.mjs';
 import { observeSubmitForWatchdog } from './watchdog.mjs';
 import { isLocalAbsolutePath, normalizeWatchdogConfig, WATCHDOG_CONFIG_ENV } from './watchdog-config.mjs';
@@ -149,17 +150,10 @@ function decodeReply(text) {
 }
 
 /**
- * Resolve the bearer credential exactly as the historical carrier did: an explicit
- * environment token first, otherwise the credential file. The value is never logged.
+ * Use the shared credential boundary, including delegated and disabled markers.
  */
 export async function resolveCarrierToken({ env = process.env, readFileImpl = readFile, credentialFile } = {}) {
-  if (typeof env?.DSH_MCP_TOKEN === 'string' && env.DSH_MCP_TOKEN.trim()) return env.DSH_MCP_TOKEN.trim();
-  try {
-    const fromFile = String(await readFileImpl(credentialFile, 'utf8')).trim();
-    return fromFile || null;
-  } catch {
-    return null;
-  }
+  return resolveBridgeCredential({ env, readFileImpl, credentialFile: credentialFile ?? defaultCredentialFile(env) });
 }
 
 /**
@@ -221,11 +215,13 @@ export function createCarrier({
       return { replied: true, code: -32700 };
     }
     const described = describeRequest(msg);
+    let token = null;
     try {
-      const token = await resolveCarrierToken({ env, readFileImpl, credentialFile });
+      token = await resolveCarrierToken({ env, readFileImpl, credentialFile });
+      if (token === null) throw new Error('DSH bridge credential unavailable');
       const response = await fetchImpl(endpoint, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...bridgeViaHeaders(env) },
         body: line,
         signal: AbortSignal.timeout(upstreamTimeoutMs),
       });
@@ -241,7 +237,8 @@ export function createCarrier({
       return { replied: true, code: response.status, text };
     } catch (e) {
       if (described?.hasId === true) {
-        stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: described.id, error: { code: -32000, message: e.message } })}\n`);
+        const message = token === null ? e.message : String(e.message).split(token).join('[redacted]');
+        stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: described.id, error: { code: -32000, message } })}\n`);
         return { replied: true, code: -32000 };
       }
       return { replied: false, code: -32000 };
