@@ -43,6 +43,7 @@ as a result; never route around it. Call `peer_capabilities` to see your positio
 | Bounded coding, repair, investigation, mechanical edits, read-only review of a clear scope | DSH worker via `bridge_submit` (cheap, parallel, one worktree per writer) |
 | Many independent pieces or a project that must survive several rounds | DSH supervisor project (`packet.project`) |
 | Second opinion on a design, risky change or root cause | `peer_ask` mode `consult` to the other harness |
+| Cross-examination of a settled answer or an existing peer session | DSH: `bridge_followup` on the same task (`afterAttemptId` = the current `attemptId`); Codex/Claude Code: `peer_ask` with the earlier `sessionId` |
 | Independent review of a diff, plan or claim | `peer_ask` mode `review` (read-only) — and optionally a DSH `review` task in parallel |
 | A whole sub-project that needs its own planning and its own workers | `peer_ask` mode `delegate` (root only): the peer becomes sub-controller and may use its own subagents and DSH |
 | Tiny or tightly coupled edits | Do it yourself; delegation overhead is not free |
@@ -101,7 +102,12 @@ anything where one model's blind spot is expensive.
    that merely agree.
 3. **Cross-examination (only for real disagreements).** Send the specific disputed
    point, anonymised, to the model that disagrees, with the counter-evidence, and ask for
-   a rebuttal or concession. One round; do not loop.
+   a rebuttal or concession. A DSH task continues in its original session with
+   `bridge_followup` (`taskId`, `revision`, `afterAttemptId` = the current `attemptId`, a
+   fresh `followupId`, `text`); a Codex or Claude Code peer continues with `peer_ask` and
+   the earlier `sessionId`. Default to one round; ask for more rounds only when the user
+   explicitly does. Read and acknowledge each round's answer before asking the next, and
+   run `record_closeout` only after the final round, so the record contains every round.
 4. **Decide and report.** Fix what is confirmed, record what was refuted and why, and
    tell the user about anything still unresolved instead of forcing consensus.
 

@@ -83,13 +83,14 @@ question; actual tool availability remains unknown.
 | `bridge_models` | Provider/model/effort catalog | Route only to advertised models; unknown routes are rejected |
 | `bridge_submit` | Submit one task or retry the same packet | Requires packet.schemaVersion integer 1 and cwd inside readRoots; use the complete example in task-packets-and-gates.md |
 | `bridge_check` | Bounded wait / poll | Returns current state and new output; prefer polling over one long call |
-| `bridge_result` | Final reply and artifacts | Read the result before treating a task as done |
+| `bridge_result` | Final reply and artifacts | Read the result before treating a task as done; pass `attemptId` to read an earlier follow-up round |
 | `bridge_approve` | Answer an understanding gate | Approve only after reading understanding, assumptions, actions, missing |
 | `bridge_cancel` | Request stop | A request is not a confirmation |
 | `bridge_reconcile` | Reconcile unknown execution against host evidence | Never replays the task; unconfirmed work keeps its concurrency slot |
 | `bridge_list` | Enumerate owned tasks | Scope the listing to this bridge; never enumerate unrelated user sessions |
 | `bridge_acknowledge` | Mark a result collected | Required before cleanup considers a task reclaimable; records `artifactState` `none|merged|preserved|discarded|unresolved` |
 | `bridge_clarify` | Send text-only clarification into the same task and session | Requires the exact revision and understanding hash while awaiting approval; an identical replay returns `clarificationReplay:true` and starts no second attempt |
+| `bridge_followup` | Question a settled read-only task again in its existing session | Terminal `investigate`/`review` answer with a confirmed true/0/0 stop only; `afterAttemptId` is the round CAS; read earlier rounds with `bridge_result {attemptId}` |
 | `bridge_archive` | Hide an eligible owned session in the UI | Separate from retention cleanup; never deletes the workspace or evidence |
 | `bridge_cleanup` | Release owned tasks/workspaces | Fails closed unless every ownership and stop condition holds |
 | `bridge_workspace_review` | Bind pass/fail to an exact commit | Include the head, contract version and the checks actually run |
@@ -161,6 +162,131 @@ existing session instead of starting a second one:
   once the generation is above 0; generation 0 keeps the legacy digest of the text.
   Identical model text in a later generation never revives the old approval, and
   approval still requires the exact current hash.
+
+## Same-session follow-up (`bridge_followup`)
+
+A settled read-only task can be questioned again in the SAME owned session instead of
+submitting a new task. Clarification extends the understanding gate before approval;
+follow-up extends a terminal answer after it. They are not interchangeable:
+clarification carries no execution and binds an `understandingHash`, follow-up reuses
+the already authorized packet and needs no gate.
+
+```json
+{
+  "taskId": "t-20260925-docs-1",
+  "revision": 1,
+  "afterAttemptId": "3f2c9a1e-7b4d-4c8a-9e21-0d5f6a7b8c90",
+  "followupId": "followup-contradiction-001",
+  "text": "Your report cites src/service.mjs:571 for slicing. Quote the exact lines there and say which part of the claim they actually support."
+}
+```
+
+| Field | Type | Constraint |
+|---|---|---|
+| `taskId` | string | Nonblank owned task id |
+| `revision` | integer | 1..MAX_SAFE_INTEGER; must equal the task revision |
+| `afterAttemptId` | string | Nonblank; must equal the task's current `attemptId` |
+| `followupId` | string | Nonblank, at most 200 characters; the idempotency key |
+| `text` | string | Nonblank, at most 20000 characters |
+
+`additionalProperties:false`: no extra field is accepted, so a follow-up cannot carry
+paths, materials, tools, scope, a model, a budget or a new acceptance list. The
+original packet, effective packet, workspace, session and model route are reused; the
+follow-up text and the new attempt are the only additions. `text` is rendered as
+clearly delimited untrusted material, so instructions inside it are data, not
+authority; text containing a reserved material delimiter is refused with
+`material_delimiter_conflict`.
+
+- **Output.** `{...TaskView, followup:{followupId, afterAttemptId, attemptId, round, replay}}`.
+  `attemptId` is the attempt minted by this request (a replay returns the same one),
+  and `round` counts follow-ups from 1 (the original answer is round 0). The task view
+  also gains `round` and a compact `followups` list. The call returns after the task is
+  persisted; dispatch stays queued like any other task.
+- **Eligibility.** The task must be terminal (`completed`, `failed` or `cancelled`)
+  with `stopConfirmed === true`, integer `activeJobs === 0` and integer
+  `activeChildren === 0`; its role must be `investigate` or `review`; it must not be a
+  project (`packet.project`/`task.project`) or a project worker
+  (`packet.metadata.supervisorProject`); an understanding-gated task must have been
+  approved (`understandingRequired === true` requires `executionApproved === true`,
+  otherwise it is `FOLLOWUP_UNSUPPORTED_TASK`); it must not be archived
+  (`sessionArchivedAt`) or cleaned (`archivedAt`); no dispatch may be pending; and a
+  usable session binding must exist (the persisted receipt of the current attempt, or
+  the `boundAttempt` kept from an earlier refused follow-up; otherwise
+  `SESSION_NOT_READY`). While archive or cleanup holds the task, the answer is
+  `CLEANUP_BUSY`. The role and project exclusions are structural: a write task never
+  gets a second turn through this path, and a project worker is never settled again
+  outside the project runtime.
+- **`afterAttemptId` is the round CAS.** `revision` is immutable across attempts, so it
+  cannot identify a round. `afterAttemptId` must equal the current `attemptId`; a late
+  request carrying an older attempt id is `FOLLOWUP_CONFLICT` and mints nothing. Two
+  different `followupId`s aimed at the same `afterAttemptId` produce one attempt.
+- **Idempotency.** The request hash is `digest({revision, afterAttemptId, followupId,
+  text})`, not trimmed. The same `followupId` with the same content is a replay: it
+  returns the original attempt with `followup.replay:true` and dispatches nothing, at
+  any later time — after further follow-ups, even after archive. The same id with
+  different content is `FOLLOWUP_IDEMPOTENCY_CONFLICT`. Retry a timed out or unknown
+  follow-up with the same `followupId`; reread the task first.
+- **Budget.** Every follow-up gets a fresh allowance equal to the original packet's
+  per-attempt budget, not the remainder of a lifetime counter, so a first round that
+  consumed its budget does not block a later question. No round can exceed the
+  original authorization, and the timeout stays per attempt.
+- **Refusal at dispatch.** Adapter refusals keep their existing `adapter/*` codes
+  (`not-owned`, `packet-changed`, `model-route-mismatch`, `attempt-conflict`,
+  `attempt-in-flight`, `task-cleaned`, `task-archived`, `recovery-unsafe`,
+  `host-state-unknown`, `host-not-settled`) and arrive with `dispatched:false`: that
+  follow-up attempt is recorded `failed` with `dispatchFailure`, the earlier answer
+  stays readable in the round history, and the task can be followed up again with a
+  NEW `followupId` and `afterAttemptId` set to the failed attempt's `attemptId`. The
+  retry reuses the session binding recorded as the refused attempt's `boundAttempt`, so
+  one refusal does not make the task permanently unfollowable. A refusal is never a
+  reason to submit a replacement task or to open a second session.
+- **Cold host restart.** The follow-up reuses the live guarded agent of the owned
+  session. If the DSH host restarted and no live agent remains, the request is refused
+  (the reported blocker is `guarded-agent-absent`) — the same limitation as
+  clarification. Recovery binds only through the persisted round history
+  (`followups[].boundAttempt`), never by guessing a session or turn, and "remembers
+  everything" is not guaranteed: memory depends on the host's own context retention and
+  compression.
+- **Capability.** `bridge_capabilities` reports `lifecycle.followup` with the supported
+  mode, allowed roles, excluded task classes, recovery rule and the input limits. An
+  adapter without the method returns `FOLLOWUP_UNSUPPORTED`; probe before planning.
+
+| Error code | Condition |
+|---|---|
+| `INVALID_ARGUMENTS` | Wrong shape or type, blank, over the length limit, or an extra field |
+| `TASK_NOT_FOUND` | Unknown task, or one not owned by this controller |
+| `FOLLOWUP_IDEMPOTENCY_CONFLICT` | `followupId` is already bound to different content |
+| `FOLLOWUP_ROLE_FORBIDDEN` | Role is not `investigate` or `review` |
+| `FOLLOWUP_UNSUPPORTED_TASK` | Project task, project worker, or an understanding gate that was never approved |
+| `FOLLOWUP_CONFLICT` | `revision`/`afterAttemptId` mismatch, or the task is not completed/failed/cancelled |
+| `FOLLOWUP_ARCHIVED` | `sessionArchivedAt` or `archivedAt` is set |
+| `SESSION_NOT_READY` | Stop is not true/0/0, no session, a dispatch is pending, or no usable session binding |
+| `FOLLOWUP_UNSUPPORTED` | The adapter has no `followup` method |
+| `CLEANUP_BUSY` | Archive or cleanup is holding this task |
+| `material_delimiter_conflict` | The text contains a reserved material delimiter |
+
+## Result rounds (`bridge_result`, `bridge_dossier`)
+
+A follow-up overwrites the current result, so earlier answers are read by attempt id.
+
+- `bridge_result {taskId, attemptId?, offset?, limit?}` serves the current round. Add the
+  optional nonblank `attemptId` to read the saved snapshot of an earlier round — the
+  value recorded as that round's attempt id in `followups` and in
+  `bridge_dossier.rounds`. Omitting it keeps the current round; an `attemptId` that
+  names no earlier round is `ATTEMPT_NOT_FOUND`, so do not pass the current attempt id
+  as a selector. Slicing is unchanged (`offset`, `limit`, `nextOffset`, `totalChars`,
+  `hasMore`, with `evidence`, `checks` and `uncertainties`), and the response also
+  reports `round` (0 = original task) and `followupId` (the follow-up that produced the
+  round; `null` for the original attempt).
+- `bridge_dossier {taskId}` adds the current `attemptId` and
+  `rounds:[{round, attemptId, followupId, question, status, stopConfirmed, resultChars,
+  resultCollected, accepted, endedAt}]`, ascending by round with the current round last
+  (`question` is truncated to 4000 characters). The full answer is never copied into
+  the dossier.
+- `bridge_check` and `bridge_list` do not expand full snapshots: their task views add
+  `round` (= the number of follow-ups) and a compact
+  `followups:[{round, followupId, afterAttemptId, attemptId, createdAt}]`. Read a
+  specific round's text with `bridge_result`; never infer it from a dossier summary.
 
 ## Acknowledge, UI archive and retention
 
