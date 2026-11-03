@@ -137,7 +137,7 @@ function makeCancelEnv({ supervisorMode = 'full', ledgerLimit = 4, adapterOverri
 
 /** Drive one gated task to a genuine awaiting-approval record with true/0/0. */
 async function driveToAwaitingApproval(env, key) {
-  const task = await env.service.submit(packet(env.dir, key, { understandingRequired: true }));
+  const task = await env.service.submit(packet(env.dir, key, { understandingRequired: true }), { submittedBy: 'codex', via: null });
   await until(() => env.starts.length >= 1 && env.starts.at(-1).id === task.id);
   env.settleUnderstanding(task.id);
   await until(() => env.service.get(task.id).status === 'awaiting_approval');
@@ -247,7 +247,7 @@ test('A4: historical safe ordinary queued cancellation is preserved, and a dispa
   // cancels with the legacy authoritative zero, exactly as before.
   const legacy = makeCancelEnv({ supervisorMode: 'none' });
   t.after(() => legacy.close());
-  const created = legacy.store.submit(validatePacket(packet(legacy.dir, 'maint-legacy-queued')), { effectiveModel: { ...MODEL } });
+  const created = legacy.store.submit(validatePacket(packet(legacy.dir, 'maint-legacy-queued')), { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL } });
   assert.equal(legacy.store.get(created.task.id).status, 'queued');
   const outcome = await legacy.service.cancel(created.task.id, 'controller requested');
   assert.equal(outcome.status, 'cancelled');
@@ -260,7 +260,7 @@ test('A4: historical safe ordinary queued cancellation is preserved, and a dispa
   // structural: missing proof keeps it unknown instead of manufacturing a stop.
   const dispatched = makeCancelEnv();
   t.after(() => dispatched.close());
-  const queued = dispatched.store.submit(validatePacket(packet(dispatched.dir, 'maint-queued-dispatched')), { effectiveModel: { ...MODEL } });
+  const queued = dispatched.store.submit(validatePacket(packet(dispatched.dir, 'maint-queued-dispatched')), { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL } });
   dispatched.store.update(queued.task.id, { dispatchStarted: true, sessionId: 'session-queued', stopConfirmed: false, activeJobs: null });
   const qOut = await dispatched.service.cancel(queued.task.id, 'queued but previously dispatched');
   assert.equal(qOut.status, 'unknown');
@@ -275,7 +275,7 @@ test('A3: a late cancel error from a superseded attempt never touches the newer 
   let entered = false;
   const gate = new Promise((resolve) => { release = resolve; });
   env.adapter.cancel = async () => { entered = true; await gate; const error = new Error('task has no trusted recoverable record'); error.code = 'adapter/unknown-task'; throw error; };
-  const task = await env.service.submit(packet(env.dir, 'maint-stale-attempt'));
+  const task = await env.service.submit(packet(env.dir, 'maint-stale-attempt'), { submittedBy: 'codex', via: null });
   await until(() => env.service.get(task.id).status === 'running' || env.service.get(task.id).status === 'starting');
   const key = env.key(task.id);
   assert.equal(env.ledger.has(key), true, 'the live attempt holds its root reservation');
@@ -369,7 +369,7 @@ function submitProjectTask(env, { key, status = 'unknown', projectStatus = 'bloc
   record.frozenAt = Date.now();
   record.deadlines = { armed: false, expired: false };
   record.workers = workers;
-  const result = env.store.submit(packetWithProject, {
+  const result = env.store.submit(packetWithProject, { submittedBy: 'codex', via: null,
     effectiveModel: { ...MODEL },
     callbackBinding: { grantId: 'grant-1', targetId: 'target-1', boundAt: 1 },
     project: record,
@@ -552,7 +552,7 @@ test('A4: recovery preserves genuine task adoption and notification dedupe for o
   const env = makeProjectEnv();
   t.after(() => env.close());
   // One ordinary recovered task: the non-project branch must keep adopting its root.
-  const ordinary = env.store.submit(validatePacket(packet(env.repository, 'maint-ordinary')), { effectiveModel: { ...MODEL } });
+  const ordinary = env.store.submit(validatePacket(packet(env.repository, 'maint-ordinary')), { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL } });
   env.store.update(ordinary.task.id, { status: 'running', phase: 'running', dispatchStarted: true, sessionId: 'session-ordinary', stopConfirmed: false, activeJobs: null });
   await env.service.recover();
   assert.equal(env.ledger.has(env.key(ordinary.task.id)), true, 'an active ordinary task is still adopted');
@@ -613,7 +613,7 @@ function submitClaimedWorker(env, projectTask, {
 } = {}) {
   const submitted = env.store.submit(
     validatePacket(packet(env.repository, key, { parentTaskId, metadata })),
-    { effectiveModel: { ...MODEL } }
+    { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL } }
   );
   env.store.update(submitted.task.id, { status, stopConfirmed, activeJobs, activeChildren });
   return env.store.get(submitted.task.id);

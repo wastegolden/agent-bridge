@@ -75,7 +75,7 @@ function fixture() {
     callback.onResult({ status: 'completed', text, stopConfirmed: true, activeJobs: 0 });
   };
   async function settled(key, extra = {}, answer = 'first answer') {
-    const submitted = await service.submit(makePacket(directory, key, extra));
+    const submitted = await service.submit(makePacket(directory, key, extra), { submittedBy: 'codex', via: null });
     await until(() => service.get(submitted.id).status === 'running', `${key} never started`);
     done(submitted.id, answer);
     await until(() => service.get(submitted.id).status === 'completed', `${key} never completed`);
@@ -223,7 +223,7 @@ test('a follow-up mints a new attempt in the same session for investigate and re
 test('a follow-up continues an approved understanding-gated task in execution mode', async () => {
   const f = fixture();
   try {
-    const submitted = await f.service.submit(makePacket(f.directory, 'fu-gated', { understandingRequired: true }));
+    const submitted = await f.service.submit(makePacket(f.directory, 'fu-gated', { understandingRequired: true }), { submittedBy: 'codex', via: null });
     await until(() => f.service.get(submitted.id).status === 'running');
     f.done(submitted.id, 'I will read one file');
     await until(() => f.service.get(submitted.id).status === 'awaiting_approval');
@@ -356,7 +356,7 @@ test('project tasks, project workers and unapproved understanding gates are unsu
     const projectPacket = validatePacket(makePacket(f.directory, 'fu-project', {
       project: { workerScope: { readRoots: [f.directory], writeRoots: [], allowedTools: ['read_file'], allowNetwork: false } },
     }));
-    const projectTask = f.store.submit(projectPacket).task;
+    const projectTask = f.store.submit(projectPacket, { submittedBy: 'codex', via: null }).task;
     f.store.update(projectTask.id, {
       status: 'completed', phase: 'completed', sessionId: 'project-session', requestId: 'project-request',
       dispatchReceiptAt: Date.now(), stopConfirmed: true, activeJobs: 0, activeChildren: 0,
@@ -368,13 +368,13 @@ test('project tasks, project workers and unapproved understanding gates are unsu
     const workerAttempt = f.store.get(worker).attemptId;
     assert.throws(() => f.service.followup(worker, { revision: 1, afterAttemptId: workerAttempt, followupId: 'worker-1', text: 'q' }), { code: 'FOLLOWUP_UNSUPPORTED_TASK' });
 
-    const failedGate = await f.service.submit(makePacket(f.directory, 'fu-gate-failed', { understandingRequired: true }));
+    const failedGate = await f.service.submit(makePacket(f.directory, 'fu-gate-failed', { understandingRequired: true }), { submittedBy: 'codex', via: null });
     await until(() => f.service.get(failedGate.id).status === 'running');
     f.service.finish(failedGate.id, { status: 'failed', text: 'cannot understand', stopConfirmed: true, activeJobs: 0 });
     await until(() => f.service.get(failedGate.id).status === 'failed');
     assert.throws(() => f.service.followup(failedGate.id, { revision: 1, afterAttemptId: f.store.get(failedGate.id).attemptId, followupId: 'gate-1', text: 'q' }), { code: 'FOLLOWUP_UNSUPPORTED_TASK' });
 
-    const cancelledGate = await f.service.submit(makePacket(f.directory, 'fu-gate-cancelled', { understandingRequired: true }));
+    const cancelledGate = await f.service.submit(makePacket(f.directory, 'fu-gate-cancelled', { understandingRequired: true }), { submittedBy: 'codex', via: null });
     await until(() => f.service.get(cancelledGate.id).status === 'running');
     await f.service.cancel(cancelledGate.id);
     await until(() => f.service.get(cancelledGate.id).status === 'cancelled');
@@ -520,7 +520,7 @@ test('late callbacks from the replaced attempt never settle or count against the
 test('a follow-up round enforces its own budget against the persisted baseline', async () => {
   const f = fixture();
   try {
-    const submitted = await f.service.submit(makePacket(f.directory, 'fu-budget', { budget: { timeoutMs: 600000, maxToolCalls: 4, maxOutputChars: 200000 } }));
+    const submitted = await f.service.submit(makePacket(f.directory, 'fu-budget', { budget: { timeoutMs: 600000, maxToolCalls: 4, maxOutputChars: 200000 } }), { submittedBy: 'codex', via: null });
     const id = submitted.id;
     await until(() => f.service.get(id).status === 'running');
     const a0 = f.store.get(id).attemptId;
@@ -614,7 +614,7 @@ test('the store persists follow-up history, the replaced-round snapshot and the 
   let store = new TaskStore({ directory, ownerId: 'owner' });
   try {
     const packet = validatePacket(makePacket(directory, 'store-followup'));
-    const submitted = store.submit(packet);
+    const submitted = store.submit(packet, { submittedBy: 'codex', via: null });
     const id = submitted.task.id;
     const settlement = { source: 'dsh-host', kind: 'attempt-settlement', attemptId: submitted.task.attemptId, requestId: 'request-store', stopDetail: 'host-idle' };
     const evidence = [settlement, { source: 'worker', kind: 'note' }];

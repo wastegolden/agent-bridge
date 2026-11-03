@@ -1412,7 +1412,7 @@ test('service and adapter agree end to end: follow-up in the same session, histo
       idempotencyKey: 'e2e-followup-1',
       scope: { writeRoots: [], allowedTools: ['read'] }
     })
-    const submitted = await service.submit(packet)
+    const submitted = await service.submit(packet, { submittedBy: 'codex', via: null })
     await until(() => typeof store.get(submitted.id).requestId === 'string', 'first dispatch receipt')
     await settle(service, submitted.id, 'round zero answer', 1)
     const first = store.get(submitted.id)

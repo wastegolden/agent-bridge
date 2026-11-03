@@ -66,7 +66,7 @@ class StubService {
     const p = validatePacket(packet)
     const grant = resolveProjectGrant(p.project, config)
     const record = createProjectRecord({ packet: p, grant, now: this.now() })
-    const result = this.store.submit(p, { effectiveModel: { ...MODEL }, callbackBinding, project: record })
+    const result = this.store.submit(p, { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL }, callbackBinding, project: record })
     if (result.created) {
       this.#reserve(result.task.id)
       // Mirror the real service admission: the deadline is armed and the supervisor's
@@ -76,9 +76,9 @@ class StubService {
     return result.task
   }
 
-  async submit(packet) {
+  async submit(packet, identity) {
     const p = validatePacket(packet)
-    const result = this.store.submit(p, { effectiveModel: p.model ?? { ...MODEL } })
+    const result = this.store.submit(p, { ...identity, effectiveModel: p.model ?? { ...MODEL } })
     if (result.created) {
       this.submitted.push({ id: result.task.id, packet: p })
       this.#reserve(result.task.id)
@@ -539,7 +539,7 @@ test('worker task submission is idempotent per logical attempt', async (t) => {
   await env.runtime.whenIdle(task.id)
   const key = env.service.submitted[0].packet.idempotencyKey
   assert.equal(key, workerAttemptKey(task.id, 'reader-a', 1))
-  const replay = await env.service.submit(env.service.submitted[0].packet)
+  const replay = await env.service.submit(env.service.submitted[0].packet, { submittedBy: 'codex', via: null })
   assert.equal(replay.id, env.service.submitted[0].id, 'the same attempt key resolves to the same task')
   assert.equal(env.store.list().filter((candidate) => candidate.id === replay.id).length, 1)
 })
@@ -757,7 +757,7 @@ test('a submit failure BEFORE insertion is a clean refusal; AFTER insertion keep
   post.runtime.workerCreate({ taskId: postTask.id, args: { workerKey: 'w1', objective: 'bounded', role: 'implement', tools: ['read'], writeRoots: [post.repository] } })
   post.runtime.planFinalize({ taskId: postTask.id })
   const original = post.service.submit.bind(post.service)
-  post.service.submit = async (packet) => { await original(packet); throw new Error('transport failure AFTER task insertion') }
+  post.service.submit = async (packet, identity) => { await original(packet, identity); throw new Error('transport failure AFTER task insertion') }
   await post.runtime.onSupervisorFinished(postTask.id, { status: 'completed', stopConfirmed: true, activeJobs: 0 })
   await post.runtime.whenIdle(postTask.id)
   const inserted = post.service.submitted[0].id
@@ -1003,7 +1003,7 @@ function realProjectPacket(repository, overrides = {}, idempotencyKey = 'real-pr
 test('the real service admission arms the deadline and clamps the supervisor budget before any tool', async (t) => {
   const env = makeRealEnv()
   t.after(() => { env.service.close(); env.runtime.close(); env.store.close() })
-  const submitted = await env.service.submit(realProjectPacket(env.repository))
+  const submitted = await env.service.submit(realProjectPacket(env.repository), { submittedBy: 'codex', via: null })
   // Admission happens after persistence and before dispatch: exactly one live timer is
   // armed even though no dsh_supervisor_* tool has been called.
   assert.equal(env.timers.length, 1, 'exactly one deadline timer is armed at admission')
@@ -1030,7 +1030,7 @@ test('the real service admission arms the deadline and clamps the supervisor bud
 test('a project task settlement still kicks the shared drain', async (t) => {
   const env = makeRealEnv()
   t.after(() => { env.service.close(); env.runtime.close(); env.store.close() })
-  const submitted = await env.service.submit(realProjectPacket(env.repository))
+  const submitted = await env.service.submit(realProjectPacket(env.repository), { submittedBy: 'codex', via: null })
   assert.ok(await waitFor(() => env.starts.length === 1))
   let kicks = 0
   const original = env.service.kick.bind(env.service)

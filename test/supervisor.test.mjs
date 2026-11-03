@@ -464,8 +464,8 @@ test('BridgeService shares the one ledger: saturation queues work and only a pro
   service.kick = () => {} // drive drain deterministically
   try {
     const model = { provider: 'deepseek-official', model: 'deepseek-flash' }
-    const a = store.submit(validatePacket(makePacket(HERE, 'svc-a')), { effectiveModel: model })
-    const b = store.submit(validatePacket(makePacket(HERE, 'svc-b')), { effectiveModel: model })
+    const a = store.submit(validatePacket(makePacket(HERE, 'svc-a')), { submittedBy: 'codex', via: null, effectiveModel: model })
+    const b = store.submit(validatePacket(makePacket(HERE, 'svc-b')), { submittedBy: 'codex', via: null, effectiveModel: model })
 
     await service.drain()
     assert.equal(startCalls, 1, 'the configured limit admits exactly one root')
@@ -487,7 +487,7 @@ test('BridgeService shares the one ledger: saturation queues work and only a pro
     assert.equal(ledger.counts().unknown, 1, 'the unreserved tally is counts().unknown; the per-entry field is ambiguous')
 
     // A settlement that reports a live child is also never terminal.
-    const c = store.submit(validatePacket(makePacket(HERE, 'svc-c')), { effectiveModel: model })
+    const c = store.submit(validatePacket(makePacket(HERE, 'svc-c')), { submittedBy: 'codex', via: null, effectiveModel: model })
     service.finish(a.task.id, { status: 'completed', stopConfirmed: true, activeJobs: 0 }, store.get(a.task.id).attemptId)
     await service.drain()
     service.finish(c.task.id, { status: 'completed', text: 'parent done', stopConfirmed: true, activeJobs: 0, activeChildren: 1 }, store.get(c.task.id).attemptId)
@@ -517,7 +517,7 @@ test('recovery adopts notification identities beyond the first 1000 events and n
   service.kick = () => {}
   try {
     const model = { provider: 'deepseek-official', model: 'deepseek-flash' }
-    const submitted = store.submit(validatePacket(makePacket(HERE, 'recover-paged')), { effectiveModel: model })
+    const submitted = store.submit(validatePacket(makePacket(HERE, 'recover-paged')), { submittedBy: 'codex', via: null, effectiveModel: model })
     const taskId = submitted.task.id
     const attemptId = submitted.task.attemptId
     // recover() only reconsiders ACTIVE work, so mark the persisted task active
@@ -564,7 +564,7 @@ test('recovery records an explicit unknown when a later event page cannot be rea
   service.kick = () => {}
   try {
     const model = { provider: 'deepseek-official', model: 'deepseek-flash' }
-    const submitted = store.submit(validatePacket(makePacket(HERE, 'recover-page-fail')), { effectiveModel: model })
+    const submitted = store.submit(validatePacket(makePacket(HERE, 'recover-page-fail')), { submittedBy: 'codex', via: null, effectiveModel: model })
     const taskId = submitted.task.id
     store.update(taskId, { status: 'running' })
     // Exactly one full page, so the loop must attempt a second read.

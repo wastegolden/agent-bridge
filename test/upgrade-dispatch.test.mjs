@@ -30,7 +30,7 @@ function fixture(){
 }
 // Drive a gated task to a stopped understanding with its dispatch receipt persisted.
 async function understood(f,key,text='understanding text'){
- const submitted=await f.service.submit(makePacket(f.directory,key,{understandingRequired:true}));
+ const submitted=await f.service.submit(makePacket(f.directory,key,{understandingRequired:true}), { submittedBy: 'codex', via: null });
  await until(()=>f.calls.starts.length===1);
  await until(()=>Number.isFinite(f.store.get(submitted.id).dispatchReceiptAt));
  const call=f.calls.starts.find(s=>s.task.id===submitted.id);
@@ -41,7 +41,7 @@ async function understood(f,key,text='understanding text'){
 }
 test('successful initial understanding persists the receipt and clears dispatch-pending',async()=>{
  const f=fixture();try{
-  const t=await f.service.submit(makePacket(f.directory,'understanding-ok',{understandingRequired:true}));
+  const t=await f.service.submit(makePacket(f.directory,'understanding-ok',{understandingRequired:true}), { submittedBy: 'codex', via: null });
   await until(()=>f.calls.starts.length===1);
   await until(()=>Number.isFinite(f.store.get(t.id).dispatchReceiptAt));
   const running=f.store.get(t.id);
@@ -165,7 +165,7 @@ test('a terminal result before the dispatch receipt never clears persisted pendi
  const f=fixture();try{
   let release;
   f.adapter.start=(task,cb)=>{f.calls.starts.push({task,cb});return new Promise(resolve=>{release=()=>resolve(receiptFor(task,'request-late'));});};
-  const submitted=await f.service.submit(makePacket(f.directory,'result-first'));
+  const submitted=await f.service.submit(makePacket(f.directory,'result-first'), { submittedBy: 'codex', via: null });
   await until(()=>f.calls.starts.length===1);
   f.calls.starts[0].cb.onResult({status:'completed',text:'done before receipt',stopConfirmed:true,activeJobs:0});
   await until(()=>f.service.get(submitted.id).status==='completed');
@@ -184,7 +184,7 @@ test('approval refuses an understanding whose dispatch receipt is still pending'
  const f=fixture();try{
   let release;
   f.adapter.start=(task,cb)=>{f.calls.starts.push({task,cb});return new Promise(resolve=>{release=()=>resolve(receiptFor(task,'request-race'));});};
-  const submitted=await f.service.submit(makePacket(f.directory,'receipt-race',{understandingRequired:true}));
+  const submitted=await f.service.submit(makePacket(f.directory,'receipt-race',{understandingRequired:true}), { submittedBy: 'codex', via: null });
   await until(()=>f.calls.starts.length===1);
   f.calls.starts[0].cb.onResult({status:'completed',text:'understood before receipt',stopConfirmed:true,activeJobs:0});
   await until(()=>f.service.get(submitted.id).status==='awaiting_approval');
@@ -203,7 +203,7 @@ test('approval refuses an understanding whose dispatch receipt is still pending'
 test('approval requires a nonblank persisted session',async()=>{
  const f=fixture();try{
   f.adapter.start=async(task,cb)=>{f.calls.starts.push({task,cb});return {sessionId:'',requestId:'request-blank',effectiveModel:task.effectiveModel,effectivePolicy:{fileScope:'hard'}};};
-  const submitted=await f.service.submit(makePacket(f.directory,'blank-session',{understandingRequired:true}));
+  const submitted=await f.service.submit(makePacket(f.directory,'blank-session',{understandingRequired:true}), { submittedBy: 'codex', via: null });
   await until(()=>f.calls.starts.length===1);
   await until(()=>Number.isFinite(f.store.get(submitted.id).dispatchReceiptAt));
   f.calls.starts[0].cb.onResult({status:'completed',text:'understood',stopConfirmed:true,activeJobs:0});
@@ -221,7 +221,7 @@ test('a late failure from a superseded attempt cannot clear or settle the newer 
   // so no receipt is ever persisted for it and its pending marker stays set.
   let rejectFirst;let firstRejected=false;
   f.adapter.start=(task,cb)=>{f.calls.starts.push({task,cb});return new Promise((resolve,reject)=>{rejectFirst=reject;});};
-  const submitted=await f.service.submit(makePacket(f.directory,'stale-error',{understandingRequired:true}));
+  const submitted=await f.service.submit(makePacket(f.directory,'stale-error',{understandingRequired:true}), { submittedBy: 'codex', via: null });
   await until(()=>f.calls.starts.length===1);
   f.calls.starts[0].cb.onResult({status:'completed',text:'first understanding',stopConfirmed:true,activeJobs:0});
   await until(()=>f.service.get(submitted.id).status==='awaiting_approval');

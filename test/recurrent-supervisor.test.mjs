@@ -63,7 +63,7 @@ class RoundService {
     const p = validatePacket(packet)
     const grant = resolveProjectGrant(p.project, config)
     const record = createProjectRecord({ packet: p, grant, now: this.now() })
-    const result = this.store.submit(p, { effectiveModel: { ...MODEL }, callbackBinding, project: record })
+    const result = this.store.submit(p, { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL }, callbackBinding, project: record })
     if (result.created) {
       this.#reserve(result.task.id)
       if (this.projects && typeof this.projects.admitProject === 'function') this.projects.admitProject(result.task.id)
@@ -72,9 +72,9 @@ class RoundService {
   }
 
   /** The real bounded WORKER task path: a durable bridge task per worker attempt. */
-  async submit(packet) {
+  async submit(packet, identity) {
     const p = validatePacket(packet)
-    const result = this.store.submit(p, { effectiveModel: p.model ?? { ...MODEL } })
+    const result = this.store.submit(p, { ...identity, effectiveModel: p.model ?? { ...MODEL } })
     if (result.created) this.submitted.push({ id: result.task.id, packet: p })
     const task = this.store.get(result.task.id)
     return { id: task.id, status: task.status, sessionId: null, workspace: null }

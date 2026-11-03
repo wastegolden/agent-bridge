@@ -72,13 +72,15 @@ export class BridgeService {
     // and leaves every legacy path byte-identical.
     this.projects=projects??null;
   }
-  async submit(packet) {
+  async submit(packet,identity) {
+    if(!identity||identity.submittedBy===undefined||identity.via===undefined)fail('AUTH_UNAVAILABLE','Submission identity is required',{field:'identity',expected:'configured credential source available'});
+    const {submittedBy,via}=identity;
     const p=validatePacket(packet);
     const catalog=await this.adapter.models();
     const model=resolveModel({task:p.model,defaults:this.defaults,catalog,profiles:this.profiles});
     // An already-accepted identical submission stays reusable without redispatch or a
     // repeated preflight; a conflicting key is rejected exactly as the store would.
-    const existing=typeof this.store.find==='function'?this.store.find(p.idempotencyKey):null;
+    const existing=typeof this.store.find==='function'?this.store.find(p.idempotencyKey,submittedBy):null;
     if(existing){
       if(existing.hash!==digest(p))fail('IDEMPOTENCY_CONFLICT','Idempotency key already belongs to another request');
       return this.view(existing.task);
@@ -119,7 +121,7 @@ export class BridgeService {
       try{callbackBinding=this.supervisor.callbackSnapshot({grantId:p.rootCallback.grantId,taskKey:p.idempotencyKey});}
       catch(e){fail(e.code==='supervisor/callback-ungranted'?'CALLBACK_UNGRANTED':'CALLBACK_INVALID',e.message,{field:'rootCallback.grantId'});}
     }
-    const submitted=this.store.submit(p,{effectiveModel:model,preflight,callbackBinding,project});
+    const submitted=this.store.submit(p,{submittedBy,via,effectiveModel:model,preflight,callbackBinding,project});
     // ADMISSION happens exactly once, right after the real task is persisted and before
     // any dispatch: the project deadline is armed and the supervisor's EFFECTIVE packet
     // budget is clamped to the grant here, so a silent or capacity-queued planner is
@@ -665,7 +667,7 @@ export class BridgeService {
     }
     const stored=selected.result&&typeof selected.result==='object'?selected.result:{};
     const text=typeof stored.text==='string'?stored.text:'';
-    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:selected===t?t.status:(selected.status??null),text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:Array.isArray(stored.evidence)?stored.evidence:[],checks:Array.isArray(stored.checks)?stored.checks:[],uncertainties:Array.isArray(stored.uncertainties)?stored.uncertainties:[]};
+    return {taskId:id,submittedBy:t.submittedBy,via:clone(t.via),revision:t.revision,attemptId:attemptId??t.attemptId,status:selected===t?t.status:(selected.status??null),text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:Array.isArray(stored.evidence)?stored.evidence:[],checks:Array.isArray(stored.checks)?stored.checks:[],uncertainties:Array.isArray(stored.uncertainties)?stored.uncertainties:[]};
   }
   /**
    * Read-only closeout dossier for one owned task. It reads the persisted record and
@@ -715,6 +717,8 @@ export class BridgeService {
     return {
       schemaVersion:1,
       taskId:task.id,
+      submittedBy:task.submittedBy,
+      via:clone(task.via),
       projectId:typeof packet.projectId==='string'?packet.projectId:null,
       title:typeof packet.title==='string'?packet.title:null,
       role:typeof packet.role==='string'?packet.role:null,

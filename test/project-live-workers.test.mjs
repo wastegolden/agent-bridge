@@ -122,9 +122,9 @@ function makeEnv({ config = {}, adapterOverrides = {} } = {}) {
   let runtime = null;
   const double = {
     ledger,
-    async submit(packet) {
+    async submit(packet, identity) {
       const p = validatePacket(packet);
-      const result = store.submit(p, { effectiveModel: p.model ?? { ...MODEL } });
+      const result = store.submit(p, { ...identity, effectiveModel: p.model ?? { ...MODEL } });
       if (result.created) {
         submitted.push({ id: result.task.id, packet: p });
         ledger.reserve({ key: `task:${result.task.id}`, kind: 'root', taskId: result.task.id });
@@ -166,7 +166,7 @@ function makeEnv({ config = {}, adapterOverrides = {} } = {}) {
     const p = validatePacket(packet);
     const grant = resolveProjectGrant(p.project, projectConfig);
     const record = createProjectRecord({ packet: p, grant, now: Date.now() });
-    const result = store.submit(p, {
+    const result = store.submit(p, { submittedBy: 'codex', via: null,
       effectiveModel: { ...MODEL },
       callbackBinding: { grantId: 'grant-1', targetId: 'target-1', boundAt: 1 },
       project: record,
@@ -296,7 +296,7 @@ function cancelRaceService({ cancelImpl, supervisor = null }) {
     materials: [],
     contractVersion: 'v1',
     budget: { timeoutMs: 1000, maxToolCalls: 2, maxOutputChars: 1000 },
-  }), { effectiveModel: { ...MODEL } }).task;
+  }), { submittedBy: 'codex', via: null, effectiveModel: { ...MODEL } }).task;
   // A genuinely DISPATCHED live task: a bare dispatchStarted/sessionId marker over a
   // queued status lets the pre-dispatch branch swallow the cancel, so the delayed cancel
   // outcome never reaches adapter.cancel at all.

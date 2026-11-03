@@ -113,7 +113,7 @@ function fixture(options = {}) {
   const f = {
     directory, store, adapter, calls, callbacks, service, writes,
     packet: (key, extra = {}) => makePacket(directory, key, extra),
-    submit: (key, extra = {}) => service.submit(makePacket(directory, key, extra)),
+    submit: (key, extra = {}) => service.submit(makePacket(directory, key, extra), { submittedBy: 'codex', via: null }),
     async settleUnderstanding(id, attemptId, text) {
       await until(() => callbacks.has(attemptId), `attempt ${attemptId} to be dispatched`);
       callbacks.get(attemptId).onResult({ status: 'completed', text, stopConfirmed: true, activeJobs: 0 });
@@ -324,7 +324,7 @@ test('clarify keeps the same session, mints a new attempt and preserves the immu
     // The original submission remains idempotent and must not redispatch.
     const startCount = f.calls.start.length;
     const reconsiderCount = f.calls.reconsider.length;
-    const resubmitted = await f.service.submit(f.packet('clarify-main', { understandingRequired: true }));
+    const resubmitted = await f.service.submit(f.packet('clarify-main', { understandingRequired: true }), { submittedBy: 'codex', via: null });
     assert.equal(resubmitted.id, task.id);
     assert.equal(f.calls.start.length, startCount);
     assert.equal(f.calls.reconsider.length, reconsiderCount);
@@ -453,7 +453,7 @@ test('clarify validates input, replays identically and confines duplicate keys b
     assert.equal(casAfter.attempt, casBase.attempt + 1, 'exactly one new attempt may be minted');
 
     // Repeated submission keys still conflict on different content.
-    const idem = await rejectsWithCode(() => f.service.submit(f.packet('clarify-cas', { understandingRequired: true, title: 'changed' })), 'idempotency conflict');
+    const idem = await rejectsWithCode(() => f.service.submit(f.packet('clarify-cas', { understandingRequired: true, title: 'changed' }), { submittedBy: 'codex', via: null }), 'idempotency conflict');
     assert.equal(idem.code, 'IDEMPOTENCY_CONFLICT');
   } finally {
     f.close();

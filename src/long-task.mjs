@@ -1668,6 +1668,7 @@ export class SupervisorProjectRuntime {
         }
       }
       if (worker === null || attempt === null) return
+      if (!this.#workerPacketBinds(task, parent, worker, attempt)) return
       if (!nonBlank(attempt.taskId)) attempt.taskId = task.id
       const { stopped } = this.#applyAttemptState(attempt, worker, task)
       // An explicit controller cancellation is never an ordinary failure, whatever path
@@ -2043,6 +2044,7 @@ export class SupervisorProjectRuntime {
    * @returns {boolean}
    */
   #workerPacketBinds(settled, task, worker, attempt) {
+    if (settled?.submittedBy !== task.submittedBy) return false
     const packet = settled?.packet
     if (!isPlainObject(packet)) return false
     if (packet.parentTaskId !== task.id) return false
@@ -2704,13 +2706,13 @@ export class SupervisorProjectRuntime {
         retries: fresh.project.budgets.retries + (attemptNumber > 1 ? 1 : 0)
       }
       if (fresh.project.startedAt === null) fresh.project.startedAt = this.#now()
-      planned = { allowance, packet: this.#workerPacket(fresh, target, idempotencyKey, allowance) }
+      planned = { allowance, packet: this.#workerPacket(fresh, target, idempotencyKey, allowance), identity: { submittedBy: fresh.submittedBy, via: fresh.via } }
       return fresh
     }, 'project/attempt-planned', { workerKey: worker.workerKey, attempt: attemptNumber, idempotencyKey, ...(budgetReason === undefined ? {} : { reason: budgetReason }) })
     if (planned === null) return { started: false, reason: refusal ?? 'project-start-budget' }
     let view
     try {
-      view = await this.#service.submit(planned.packet)
+      view = await this.#service.submit(planned.packet, planned.identity)
     } catch (error) {
       await this.#resolveSubmitFailure(task.id, worker.workerKey, { attempt: attemptNumber, idempotencyKey, grantedToolCalls: planned.allowance }, error)
       return { started: true }
@@ -2753,7 +2755,7 @@ export class SupervisorProjectRuntime {
     let found = null
     let lookupFailed = false
     try {
-      if (this.#store !== null && typeof this.#store.find === 'function') found = this.#store.find(record.idempotencyKey)
+      if (this.#store !== null && typeof this.#store.find === 'function') found = this.#store.find(record.idempotencyKey, this.#store.get(taskId).submittedBy)
     } catch {
       lookupFailed = true
     }
