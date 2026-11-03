@@ -43,7 +43,7 @@
     "peer_config": {
       "type": "file",
       "title": "agent-peer config",
-      "description": "Absolute path of the agent-peer JSON config (peer CLI executables, state directory, limits). Shared with the Codex side so both see the same job ledger.",
+      "description": "Absolute path of the agent-peer JSON config (peer CLI executables, state directory, limits). Each root controller (Claude Code, Codex) uses its own config file with its own bridge credential; both point at the same stateDir so they share one job ledger.",
       "default": ""
     }
   }

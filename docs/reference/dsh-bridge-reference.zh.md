@@ -75,7 +75,7 @@ node scripts/uninstall.mjs --profile <DSH-profile绝对目录> --dry-run --json
 node scripts/uninstall.mjs --profile <DSH-profile绝对目录> --json
 ```
 
-DSH 插件配置可设置 `dataDirectory`、`ownerId`、`endpoint`、`credentialFile` 或 `tokenEnv`、`maxConcurrent`、`routeLimits`、`defaultModel`、`profiles`、`skills`、`retention`、`childSessions`、`commandProfiles`/`commandJobs`、`rootCallbackGrants` 与 `eventWake`。宿主显式 `credentialFile` 优先，否则读取 `tokenEnv`（默认 `DSH_MCP_TOKEN`）。凭据至少 24 字符，不写入插件包。可把以上非密钥配置保存成 JSON 文件，并在安装命令中添加 `--host-config <配置文件绝对路径>`。
+DSH 插件配置可设置 `dataDirectory`、`ownerId`、`endpoint`、`controllers`、`identityMigrationBackupDirectory`、`maxConcurrent`、`routeLimits`、`defaultModel`、`profiles`、`skills`、`retention`、`childSessions`、`commandProfiles`/`commandJobs`、`rootCallbackGrants` 与 `eventWake`。自 1.8.0 起认证改为按控制器配置：`controllers` 中每项给出 `id`、`tokenFile`（绝对路径）和可选的 `admin`，宿主按请求所带的凭据识别控制器；旧的顶层 `credentialFile`、`tokenEnv` 会被拒绝。已有 v0 任务库首次升级时必须配置 `identityMigrationBackupDirectory`。凭据至少 24 字符，不写入插件包。详见 `docs/controller-identity.md`。可把以上非密钥配置保存成 JSON 文件，并在安装命令中添加 `--host-config <配置文件绝对路径>`。
 
 ## 受控自治：子会话、作业与事件唤醒（1.2.0）
 
@@ -86,7 +86,12 @@ DSH 插件配置可设置 `dataDirectory`、`ownerId`、`endpoint`、`credential
 ```json
 {
   "dataDirectory": "F:/DSH/data/codex-bridge-v1",
-  "credentialFile": "F:/DSH/data/codex-bridge-v1/bridge-token",
+  "controllers": [
+    { "id": "claude-code", "tokenFile": "F:/DSH/data/codex-bridge-v1/credentials/claude-code.token" },
+    { "id": "codex", "tokenFile": "F:/DSH/data/codex-bridge-v1/credentials/codex.token" },
+    { "id": "operator", "tokenFile": "F:/DSH/data/codex-bridge-v1/credentials/operator.token", "admin": true }
+  ],
+  "identityMigrationBackupDirectory": "F:/DSH/data/codex-bridge-v1/identity-backups",
   "maxConcurrent": 16,
   "childSessions": { "enabled": true, "maxDepth": 1, "maxChildrenPerTask": 2 },
   "commandProfiles": [
