@@ -665,7 +665,7 @@ export class BridgeService {
     }
     const stored=selected.result&&typeof selected.result==='object'?selected.result:{};
     const text=typeof stored.text==='string'?stored.text:'';
-    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:t.status,text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:stored.evidence,checks:stored.checks,uncertainties:stored.uncertainties};
+    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:selected===t?t.status:(selected.status??null),text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:stored.evidence,checks:stored.checks,uncertainties:stored.uncertainties};
   }
   /**
    * Read-only closeout dossier for one owned task. It reads the persisted record and

@@ -1362,3 +1362,95 @@ test('a running follow-up recovered after an adapter reset keeps execution mode'
   const network = host.runTool('session-1', 'web_search', {}, 'call-net')
   assert.equal(network.allowed, true, `the approved network tool must not be fenced as understanding: ${network.reason ?? ''}`)
 })
+
+// ---------------------------------------------------------------------------
+// cross-layer: real BridgeService + TaskStore + real DshAdapter on the fake host
+// ---------------------------------------------------------------------------
+
+test('service and adapter agree end to end: follow-up in the same session, history readable, restart rebinds through the store entry', async () => {
+  const { TaskStore } = await import('../src/store.mjs')
+  const { BridgeService } = await import('../src/service.mjs')
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-followup-e2e-'))
+  // The fake host's durable inspect returns this array by reference; mirroring every
+  // emitted session event into it stands in for the real host's persisted session log.
+  const durableEvents = [{ type: 'model/selection', seq: 0, time: 0, data: { provider: FLASH.provider, model: FLASH.model } }]
+  const host = createFakeHost({ initialStatus: 'idle', durableEvents })
+  const emitSession = host.emitSession
+  host.emitSession = (sessionId, event) => {
+    durableEvents.push({ seq: durableEvents.length, time: durableEvents.length, ...event })
+    return emitSession.call(host, sessionId, event)
+  }
+  const catalog = [{ provider: 'deepseek-official', models: [{ id: 'deepseek-flash' }] }]
+  // The service sees the REAL adapter; only the model catalog is stubbed.
+  const wire = (real) => ({
+    models: async () => catalog,
+    start: (task, hooks) => real.start(task, hooks),
+    followup: (task, hooks) => real.followup(task, hooks),
+    cancel: (task) => real.cancel(task),
+    inspect: (task) => real.inspect(task)
+  })
+  const until = async (predicate, label) => {
+    const deadline = Date.now() + 5000
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out: ${label}`)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+  const settle = async (service, id, text, turn) => {
+    const task = service.store.get(id)
+    claim(host, task.sessionId, task.requestId, turn)
+    host.emitAssistant(task.sessionId, turn, text)
+    host.emitTurnEnd(task.sessionId, turn, { kind: 'completed' })
+    await until(() => service.store.get(id).status === 'completed', `${text} settles`)
+  }
+  let store = new TaskStore({ directory, ownerId: 'owner-e2e' })
+  let service = new BridgeService({ store, adapter: wire(new DshAdapter(host.ctx, { ownerId: 'owner-e2e' })), maxConcurrent: 2 })
+  try {
+    const packet = makePacket({
+      idempotencyKey: 'e2e-followup-1',
+      scope: { writeRoots: [], allowedTools: ['read'] }
+    })
+    const submitted = await service.submit(packet)
+    await until(() => typeof store.get(submitted.id).requestId === 'string', 'first dispatch receipt')
+    await settle(service, submitted.id, 'round zero answer', 1)
+    const first = store.get(submitted.id)
+
+    const out = service.followup(submitted.id, { revision: 1, afterAttemptId: first.attemptId, followupId: 'e2e-f1', text: 'Why that answer?' })
+    await until(() => typeof store.get(submitted.id).requestId === 'string' && store.get(submitted.id).status === 'running', 'follow-up dispatch')
+    const running = store.get(submitted.id)
+    assert.equal(running.sessionId, first.sessionId, 'the follow-up runs in the SAME session')
+    assert.equal(host.calls.create.length, 1, 'no second session is created')
+    const sent = host.calls.prompt.at(-1).content[0].text
+    assert.match(sent, /Why that answer\?/, 'the service-built fenced prompt reaches the host')
+    await settle(service, submitted.id, 'round one answer', 2)
+
+    assert.equal(service.result(submitted.id).text, 'round one answer')
+    const old = service.result(submitted.id, { attemptId: first.attemptId })
+    assert.equal(old.text, 'round zero answer')
+    assert.equal(old.round, 0)
+    assert.equal(old.status, 'completed', 'a historical round reports its own status')
+    const dossier = service.dossier(submitted.id)
+    assert.deepEqual(dossier.rounds.map((r) => [r.round, r.attemptId]), [[0, first.attemptId], [1, out.followup.attemptId]])
+
+    // Restart the bridge: a fresh adapter (no in-memory record) and a fresh service on
+    // the same store. The live guarded agent is still registered in the host, so the
+    // store-written followups[].boundAttempt must rebind the session.
+    service.close()
+    store.close()
+    store = new TaskStore({ directory, ownerId: 'owner-e2e' })
+    service = new BridgeService({ store, adapter: wire(new DshAdapter(host.ctx, { ownerId: 'owner-e2e' })), maxConcurrent: 2 })
+    const second = store.get(submitted.id)
+    service.followup(submitted.id, { revision: 1, afterAttemptId: second.attemptId, followupId: 'e2e-f2', text: 'And after a restart?' })
+    await until(() => ['running', 'failed', 'unknown'].includes(store.get(submitted.id).status), 'post-restart follow-up dispatch')
+    const after = store.get(submitted.id)
+    assert.equal(after.status, 'running', `post-restart follow-up dispatched (error: ${after.error?.message ?? 'none'})`)
+    assert.equal(after.sessionId, first.sessionId)
+    assert.equal(host.calls.create.length, 1)
+  } finally {
+    service.close()
+    store.close()
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
