@@ -113,7 +113,7 @@ Both scripts accept `--dry-run` (`--plan` is a synonym) to print the plan first.
 
 4. Start DSH.
 
-When upgrading from the shared `credentialFile` authentication to controller identity (`controllers`), do not simply start the host: install the new package first (section 1; the old package cannot read `controllers`), then follow the upgrade/rollback section of [docs/controller-identity.md](docs/controller-identity.md) — drain the whole host, stop, back up, and do the two restarts (overlap config, then the final config without `legacy`). Merge the generated identity fragment into the complete host config before starting. The old top-level authentication keys are refused at mount.
+When upgrading from the shared `credentialFile` authentication to controller identity (`controllers`), do not simply start the host. Follow the upgrade/rollback section of [docs/controller-identity.md](docs/controller-identity.md) in this order: drain the whole host → stop → back up the old package, configuration, database (with WAL/SHM and events), clients and token material (keep the live controller token files and the backups needed for recovery) → install the new package → merge the identity fragment into the complete host config (overlap) → first restart → disposable identity/delegate smoke test → remove `legacy` from the final complete host config → second restart and confirm the old token returns HTTP 401. The old package cannot read `controllers`, so the new package must be installed before the first restart; the old top-level authentication keys are refused at mount.
 
 Example host config (replace the paths; the full validation rules are in [docs/controller-identity.md](docs/controller-identity.md)):
 
@@ -164,7 +164,7 @@ claude plugin configure agent-bridge@agent-bridge
 The marketplace name and the plugin name both come from `.claude-plugin/marketplace.json` (`agent-bridge` / `agent-bridge`). Without flags, `configure` only shows the options and which are unset; to save values, pipe a JSON object into `--values-stdin` (options left out keep their values):
 
 ```bash
-echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<path>/agent-peer.claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<path>/agent-peer-claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
 ```
 
 The three options:
@@ -189,7 +189,7 @@ node scripts/deploy-local.mjs --config <your deploy.json> --dry-run
 node scripts/deploy-local.mjs --config <your deploy.json>
 ```
 
-It creates machine-specific files only when they are **missing** and never overwrites an existing one: the Claude local marketplace (`<deployRoot>/.claude-plugin/marketplace.json`), one `config/agent-peer.<root>.json` per root (shared `stateDir`, each with its own `credentialFile`), the Codex plugin's `.mcp.json` (based on `.codex-mcp.json`: `dsh_project` through the stdio carrier with Codex's own credential environment, `agent_peer` with the absolute node path and Codex's own peer config) and the Codex personal-marketplace entry. It writes machine paths into the deployed copy's plugin defaults, syncs the Codex plugin skills and manifest, and — when `claudeExecutable` is set — refreshes the Claude Code plugin cache.
+In non-identity mode it only creates these machine-specific files when they are missing: the Claude local marketplace (`<deployRoot>/.claude-plugin/marketplace.json`), `config/agent-peer.json`, the Codex plugin's `.mcp.json` and the Codex personal-marketplace entry. With `identity` enabled it additionally produces the identity artifacts: missing controller token files are generated with `randomBytes(32)` while an existing valid token file is kept byte for byte; one `config/agent-peer-claude-code.json` / `config/agent-peer-codex.json` per root (in the same directory as `peerConfig`, sharing one `stateDir` and each pointing `bridge.credentialFile` at that root's own token file), where an existing config is validated for the shared `stateDir` and its own `credentialFile` and refused on a mismatch rather than rewritten; the overlap/final host identity fragments are regenerated on every apply; and the Codex `.mcp.json` gets the two A3 stdio entries from `.codex-mcp.json` (`dsh_project`, `agent_peer`) replacing the same-named entries when the content differs (otherwise it is only validated), while the user's unrelated MCP servers are preserved. It also writes machine paths into the deployed copy's plugin defaults, syncs the Codex plugin skills and manifest, and — when `claudeExecutable` is set — refreshes the Claude Code plugin cache; `--dry-run` writes nothing and generates no token.
 
 3. **Quit and reopen the Claude desktop app**; start a new Codex session.
 
@@ -206,7 +206,7 @@ codex plugin add agent-bridge@personal
 
 ### 5. agent-peer config
 
-Each root gets its **own separate** agent-peer config file: Claude's `peer_config` points at `config/agent-peer.claude-code.json` and Codex's `AGENT_PEER_CONFIG` at `config/agent-peer.codex.json`. Both files share one `stateDir` (so both roots see the same job and chain ledger), but each `bridge.credentialFile` points at that root's own controller token file (`credentials/claude-code.token` / `credentials/codex.token`). Never hand one file with a `credentialFile` to both roots: one root would read the other's credential. The template below uses `<root-controller-id>`; the deploy tooling generates one copy per root. If the machine still has the old single `config/agent-peer.json`, split it into two copies and set each `bridge.credentialFile` (the deploy tooling only fills missing files and never rewrites an existing one).
+Each root gets its **own separate** agent-peer config file: Claude's `peer_config` points at `config/agent-peer-claude-code.json` and Codex's `AGENT_PEER_CONFIG` at `config/agent-peer-codex.json`. Both files share one `stateDir` (so both roots see the same job and chain ledger), but each `bridge.credentialFile` points at that root's own controller token file (`credentials/claude-code.token` / `credentials/codex.token`). Never hand one file with a `credentialFile` to both roots: one root would read the other's credential. The template below uses `<root-controller-id>`; the deploy tooling generates one copy per root. If the machine still has the old single `config/agent-peer.json`, the deploy tooling derives each missing per-root config from it and points `bridge.credentialFile` at that root's own token file; an existing per-root config is validated and kept.
 
 ```json
 {

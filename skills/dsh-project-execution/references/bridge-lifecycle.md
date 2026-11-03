@@ -85,9 +85,11 @@ coding task. Full schema, validation limits, audit and credential details:
    files. The live controller token files are not disposable: keep them and their
    backups.
 4. **Install the new package before the first restart.** Run the uninstall/install
-   sequence (README install section) while the host is stopped. The first restart must
-   load the identity-aware code that understands `controllers` and performs the store
-   migration; never restart the old package with the new configuration.
+   sequence (README install section) while the host is stopped. After installing, merge
+   the overlap identity fragment into the complete host config used for the first
+   restart. The first restart must load the identity-aware code that understands
+   `controllers` and performs the store migration; never restart the old package with the
+   new configuration.
 5. **First restart (overlap).** Start with the overlap config. The store snapshots the
    old database into `identityMigrationBackupDirectory` and migrates 0 → 1; a mount
    failure (`STORE_BACKUP_FAILED` / `STORE_MIGRATION_FAILED`) means the host did not

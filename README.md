@@ -113,7 +113,7 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 
 4. 启动 DSH。
 
-如果是从共享 `credentialFile` 升级到控制器身份（`controllers`），不要直接启动：先按第 1 小节安装新包（旧包读不了 `controllers`），再按 [docs/controller-identity.md](docs/controller-identity.md) 的升级/回滚章节执行整机排空、停止、备份和两次重启（overlap 配置 → 移除 `legacy` 的 final 配置）。`identity` 片段要合并进完整宿主配置后再启动。旧的顶层认证字段会被拒绝挂载。
+如果是从共享 `credentialFile` 升级到控制器身份（`controllers`），不要直接启动，按 [docs/controller-identity.md](docs/controller-identity.md) 的升级/回滚章节执行：排空整机 → 停止 → 备份旧包、配置、数据库（含 WAL/SHM 和 events）、客户端配置和令牌材料（保留 live 控制器令牌文件与恢复所需备份）→ 安装新包 → 把 identity 片段合并进完整宿主配置（overlap）→ 第一次重启 → 可丢弃的身份/委派双向冒烟 → 在 final 完整配置中移除 `legacy` → 第二次重启并确认旧令牌返回 401。旧包读不了 `controllers`，所以新包必须在第一次重启前装好；旧的顶层认证字段会被拒绝挂载。
 
 宿主配置示例（字段见下方，路径用你自己的；完整校验规则见 [docs/controller-identity.md](docs/controller-identity.md)）：
 
@@ -164,7 +164,7 @@ claude plugin configure agent-bridge@agent-bridge
 市场名和插件名都来自 `.claude-plugin/marketplace.json`（`agent-bridge` / `agent-bridge`）。`configure` 不带参数时只显示选项和哪些还没设；要写入，就把一个 JSON 对象从标准输入传给 `--values-stdin`，没写到的选项保持原值：
 
 ```bash
-echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/agent-peer.claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/agent-peer-claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
 ```
 
 三个选项：
@@ -189,7 +189,7 @@ node scripts/deploy-local.mjs --config <你的 deploy.json> --dry-run
 node scripts/deploy-local.mjs --config <你的 deploy.json>
 ```
 
-它只在本机文件**缺失时**创建这些机器相关文件，已存在的一律不覆盖：Claude 的本地插件市场（`<deployRoot>/.claude-plugin/marketplace.json`）、`config/agent-peer.<root>.json`（每个根一份，共用 `stateDir`、各自 `credentialFile`）、Codex 插件的 `.mcp.json`（以 `.codex-mcp.json` 为基础：`dsh_project` 走 stdio 载体并读取 Codex 自己的凭据环境，`agent_peer` 用 node 绝对路径和 Codex 自己的 peer 配置）、Codex 的 personal 市场条目。它会把本机路径写进部署副本的插件默认值、同步 Codex 插件的 skills 与清单，并（配置了 `claudeExecutable` 时）刷新 Claude Code 的插件缓存。
+非身份模式下，它只在这几个机器相关文件缺失时创建：Claude 的本地插件市场（`<deployRoot>/.claude-plugin/marketplace.json`）、`config/agent-peer.json`、Codex 插件的 `.mcp.json` 和 Codex 的 personal 市场条目。启用 `identity` 后，它另外生成身份产物：缺失的控制器令牌文件用 `randomBytes(32)` 生成，已存在的有效令牌文件原样保留；每个根一份 `config/agent-peer-claude-code.json` / `config/agent-peer-codex.json`（与 `peerConfig` 同目录，共用 `stateDir`、各自 `bridge.credentialFile`），已存在的配置会校验 `stateDir` 和该根自己的 `credentialFile`，不一致就拒绝而不是改写；overlap/final 宿主身份片段每次应用都重写；Codex 的 `.mcp.json` 内容不同时用 `.codex-mcp.json` 的两个 A3 stdio 入口（`dsh_project`、`agent_peer`）覆盖同名条目，内容相同时只校验，并保留用户的其他 MCP server。它还会把本机路径写进部署副本的插件默认值、同步 Codex 插件的 skills 与清单，并（配置了 `claudeExecutable` 时）刷新 Claude Code 的插件缓存；`--dry-run` 不写文件、不生成令牌。
 
 3. **完全退出并重开 Claude 桌面版**，Codex 开一个新会话。
 
@@ -206,7 +206,7 @@ codex plugin add agent-bridge@personal
 
 ### 5. agent-peer 配置
 
-每个根使用**自己独立的** agent-peer 配置文件：Claude 的 `peer_config` 指向 `config/agent-peer.claude-code.json`，Codex 的 `AGENT_PEER_CONFIG` 指向 `config/agent-peer.codex.json`。两份配置共用同一个 `stateDir`（因此两边看到同一个作业账本和链账本），但 `bridge.credentialFile` 分别指向该根自己的控制器令牌文件（`credentials/claude-code.token` / `credentials/codex.token`）。不要把一份带 `credentialFile` 的配置文件同时交给两个根，否则一个根会读到另一个根的凭据。下面是一份模板，把 `<root-controller-id>` 和路径换成该根自己的值；部署工具会为每个根生成一份。如果机器上已经有旧的单一 `config/agent-peer.json`，要把它复制成两份并分别设置 `bridge.credentialFile`（部署工具只补缺失文件，不会改写已有文件）。
+每个根使用**自己独立的** agent-peer 配置文件：Claude 的 `peer_config` 指向 `config/agent-peer-claude-code.json`，Codex 的 `AGENT_PEER_CONFIG` 指向 `config/agent-peer-codex.json`。两份配置共用同一个 `stateDir`（因此两边看到同一个作业账本和链账本），但 `bridge.credentialFile` 分别指向该根自己的控制器令牌文件（`credentials/claude-code.token` / `credentials/codex.token`）。不要把一份带 `credentialFile` 的配置文件同时交给两个根，否则一个根会读到另一个根的凭据。下面是一份模板，把 `<root-controller-id>` 和路径换成该根自己的值；部署工具会为每个根生成一份。如果机器上已经有旧的单一 `config/agent-peer.json`，部署工具会以它为底本为每个根创建缺失的 peer 配置，并把 `bridge.credentialFile` 指向该根自己的令牌文件；已存在的 per-root 配置只校验、不改写。
 
 ```json
 {

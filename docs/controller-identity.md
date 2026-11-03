@@ -596,25 +596,33 @@ document.
    `F:/temp/agent-bridge-upstream/backups`, and make sure it is writable and outside
    the DSH data directory and any git worktree.
 3. Have the deployment tooling prepare the identity inputs: one token file per
-   controller (create if missing, validate and keep existing ones), the
-   `controllers` list, `identityMigrationBackupDirectory`, and both an **overlap** host
-   configuration (includes the temporary `legacy` administrator) and a **final**
-   configuration (without `legacy`). The deploy config's `identity` block carries
-   `credentialDirectory`, `migrationBackupDirectory` and an optional `legacyTokenFile`,
-   and its output is an **identity fragment** (`controllers` +
+   controller (create if missing with `randomBytes(32)`, validate and keep valid
+   existing bytes), the `controllers` list, `identityMigrationBackupDirectory`, and both
+   an **overlap** host configuration (includes the temporary `legacy` administrator) and
+   a **final** configuration (without `legacy`). The deploy config's `identity` block
+   carries `credentialDirectory`, `migrationBackupDirectory` and an optional
+   `legacyTokenFile`, and its output is an **identity fragment** (`controllers` +
    `identityMigrationBackupDirectory`) to **merge into the complete host config** that
    keeps `dataDirectory`, `ownerId` and every other host field; the overlap and final
-   configs are each complete. A dry run must generate no token.
+   configs are each complete. In identity mode the deploy additionally writes these
+   identity artifacts: a per-root peer config is created only when absent (an existing
+   one is validated for the shared `stateDir` and its own `bridge.credentialFile`, and a
+   stale mismatch is refused rather than rewritten); the overlap and final host identity
+   fragments are regenerated on every apply; and an existing Codex `.mcp.json` is
+   migrated to the two A3 stdio entries from `.codex-mcp.json` (`dsh_project` through
+   `bin/bridge.mjs`, and `agent_peer`) while unrelated MCP servers are preserved. A dry
+   run writes nothing and generates no token.
 4. Refresh the client side so each root uses its **own** controls, not a shared one:
    - Claude Code uses its own controller token for the `dsh_project` HTTP entry, loaded
      into the Claude **root launch environment** as `DSH_MCP_TOKEN`;
    - Codex's root clears the shared environment token and uses its own credential file
      through the stdio carrier, with its own `AGENT_PEER_CONFIG`;
-   - each root gets its **own separate** agent-peer config (for example
-     `config/agent-peer.claude-code.json` and `config/agent-peer.codex.json`). The two
-     configs share the same `stateDir`, but each `bridge.credentialFile` points at that
-     root's own token file. Replace the legacy single shared file: copy it once per root
-     and set each `bridge.credentialFile`;
+   - each root gets its **own separate** agent-peer config, `agent-peer-claude-code.json`
+     and `agent-peer-codex.json`, in the configured peer-config directory (default
+     `<deployRoot>/config`). Both share the same `stateDir`, but each
+     `bridge.credentialFile` points at that root's own token file. The deploy tooling
+     derives each missing per-root config from a legacy single shared file; an existing
+     per-root config is validated and kept;
    - the operator command uses its own file.
    Point each client at the overlap configuration for the maintenance window.
 
@@ -631,9 +639,10 @@ document.
      controller token files are not disposable**: keep them and their backup copies.
 3. Keep a restore copy and do not delete the old installation yet.
 4. Install the new package (the uninstall/install sequence in README §1) while the host
-   is stopped, **before the first restart**. The first restart must load the
-   identity-aware code that validates `controllers` and migrates the store; never start
-   the old package with the new configuration.
+   is stopped, **before the first restart**. After installing, merge the overlap identity
+   fragment into the complete host config used for the first restart. The first restart
+   must load the identity-aware code that validates `controllers` and migrates the store;
+   never start the old package with the new configuration.
 
 ### 3. First restart (overlap)
 
