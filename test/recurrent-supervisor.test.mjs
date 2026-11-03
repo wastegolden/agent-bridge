@@ -295,7 +295,7 @@ test('bridge_pause and bridge_resume are advertised with bounded required argume
   assert.ok(resume)
   assert.deepEqual(pause.inputSchema.required, ['taskId', 'requestId'])
   assert.deepEqual(resume.inputSchema.required, ['taskId', 'requestId'])
-  assert.deepEqual(Object.keys(pause.inputSchema.properties).sort(), ['reason', 'requestId', 'taskId'])
+  assert.deepEqual(Object.keys(pause.inputSchema.properties).sort(), ['override', 'reason', 'requestId', 'taskId'])
 })
 
 // ---------------------------------------------------------------------------

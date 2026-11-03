@@ -785,7 +785,10 @@ test('bridge_clarify and bridge_archive route through the public dispatcher', TE
   const f = fixture();
   try {
     assertLifecycleApi(f.service);
-    const dispatch = createDispatcher(f.service);
+    // The public dispatcher requires an authenticated caller context; the fixture submits as codex.
+    const callerContext = { principal: { id: 'codex', admin: false }, via: null, controllerIds: ['codex'] };
+    const dispatchAs = createDispatcher(f.service);
+    const dispatch = (name, args) => dispatchAs(name, args, callerContext);
 
     const task = await f.submit('dispatch-clarify', { understandingRequired: true });
     await f.settleUnderstanding(task.id, task.attemptId, 'U0');
