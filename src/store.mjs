@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { digest, clone, fail, TERMINAL } from './contracts.mjs';
 
 // Clarification request hashes bind every call input except the taskId, which is
@@ -12,6 +13,8 @@ export const clarificationRequestHash = ({revision,understandingHash,clarificati
 export const followupRequestHash = ({revision,afterAttemptId,followupId,text}) => digest({revision,afterAttemptId,followupId,text});
 
 const FOLLOWUP_ROLES = new Set(['investigate','review']);
+const TASKS_V1 = 'CREATE TABLE tasks(id TEXT PRIMARY KEY, owner TEXT NOT NULL, submittedBy TEXT NOT NULL, idem TEXT NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(owner,submittedBy,idem))';
+const EVENTS = 'CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX task_events ON events(task_id,seq)';
 // The adapter re-derives a recovered cancellation from the SAME host settlement
 // evidence the previous attempt recorded, so the binding keeps only that evidence.
 function followupSettlementEvidence(result) {
@@ -20,22 +23,78 @@ function followupSettlementEvidence(result) {
 }
 
 export class TaskStore {
-  constructor({directory,ownerId}) {
+  constructor({directory,ownerId,migrationBackupDirectory}) {
     if (!ownerId || !directory) fail('INVALID_STORE','Store directory and owner required');
     fs.mkdirSync(directory,{recursive:true});
     this.ownerId=ownerId; this.directory=directory;
     this.db=new DatabaseSync(path.join(directory,'tasks.sqlite'));
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(owner,idem)); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS task_events ON events(task_id,seq);');
+    try {
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000');
+      const version=this.db.prepare('PRAGMA user_version').get().user_version;
+      const objects=this.db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name").all();
+      if(version===0&&objects.length===0){
+        this.transaction(()=>this.db.exec(`${TASKS_V1}; ${EVENTS}; PRAGMA user_version=1`));
+        return;
+      }
+      const unsupported=()=>fail('STORE_SCHEMA_UNSUPPORTED','Store version and schema must match',{field:'user_version',expected:'supported matching schema'});
+      if(![0,1].includes(version))unsupported();
+      if(!isDeepStrictEqual(objects.map(o=>[o.type,o.name]),[['table','events'],['index','task_events'],['table','tasks']]))unsupported();
+      const expectedSql={tasks:version===1?TASKS_V1:TASKS_V1.replace(' submittedBy TEXT NOT NULL,','').replace('owner,submittedBy,idem','owner,idem'),events:EVENTS.split('; ')[0],task_events:EVENTS.split('; ')[1]};
+      // Match the schemas this store has shipped, including collation, uniqueness
+      // and AUTOINCREMENT. SQLite quotes the table name after ALTER TABLE RENAME.
+      for(const object of objects){
+        const [actual,expected]=[object.sql.replace(/^CREATE TABLE "tasks"/i,'CREATE TABLE tasks'),expectedSql[object.name]].map(sql=>sql.replace(/\s+/g,' ').replace(/\s*([(),])\s*/g,'$1').trim().toLowerCase());
+        if(actual!==expected)unsupported();
+      }
+      const rows=this.db.prepare('SELECT * FROM tasks ORDER BY rowid').all();
+      for(const row of rows){
+        let body;
+        try{body=JSON.parse(row.body);}catch{unsupported();}
+        if(!body||typeof body!=='object'||Array.isArray(body)||body.id!==row.id||body.ownerId!==row.owner||body.packet?.idempotencyKey!==row.idem||body.requestHash!==row.hash)unsupported();
+        if(version===0){
+          if(Object.hasOwn(body,'submittedBy')||Object.hasOwn(body,'via'))unsupported();
+        }else if(!Object.hasOwn(body,'via')||(body.submittedBy!==null&&(typeof body.submittedBy!=='string'||! /^[a-z][a-z0-9-]{0,63}$/.test(body.submittedBy)))||row.submittedBy!==(body.submittedBy??''))unsupported();
+      }
+      if(version===1)return;
+      // VACUUM INTO reads a consistent SQLite snapshot, including committed WAL.
+      // The snapshot must be checked and flushed before any migration transaction.
+      try{
+        if(typeof migrationBackupDirectory!=='string'||!path.isAbsolute(migrationBackupDirectory))throw new Error('An absolute migration backup directory is required');
+        fs.mkdirSync(migrationBackupDirectory,{recursive:true});
+        const backupPath=path.join(migrationBackupDirectory,`tasks-v0-${Date.now()}-${randomUUID()}.sqlite`);
+        this.db.prepare('VACUUM INTO ?').run(backupPath);
+        const snapshot=new DatabaseSync(backupPath,{readOnly:true});
+        try{if(snapshot.prepare('PRAGMA integrity_check').all().some(row=>row.integrity_check!=='ok'))throw new Error('Snapshot integrity check failed');}
+        finally{snapshot.close();}
+        const fd=fs.openSync(backupPath,'r+');
+        try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+      }catch{
+        fail('STORE_BACKUP_FAILED','A durable migration snapshot could not be created',{field:'identityMigrationBackupDirectory',expected:'writable absolute backup directory and valid SQLite snapshot'});
+      }
+      try{
+        this.transaction(()=>{
+          this.db.exec(TASKS_V1.replace('TABLE tasks(','TABLE tasks_v1('));
+          const insert=this.db.prepare('INSERT INTO tasks_v1(id,owner,submittedBy,idem,hash,body) VALUES(?,?,?,?,?,?)');
+          for(const row of rows)insert.run(row.id,row.owner,'',row.idem,row.hash,JSON.stringify({...JSON.parse(row.body),submittedBy:null,via:null}));
+          const copied=this.db.prepare('SELECT * FROM tasks_v1 ORDER BY rowid').all();
+          if(copied.length!==rows.length||copied.some((row,i)=>row.id!==rows[i].id||row.owner!==rows[i].owner||row.idem!==rows[i].idem||row.hash!==rows[i].hash||row.submittedBy!==''||!isDeepStrictEqual(JSON.parse(row.body),{...JSON.parse(rows[i].body),submittedBy:null,via:null})))throw new Error('Migration verification failed');
+          this.db.exec('DROP TABLE tasks; ALTER TABLE tasks_v1 RENAME TO tasks; PRAGMA user_version=1');
+        });
+      }catch{
+        fail('STORE_MIGRATION_FAILED','Task identity migration failed and was rolled back',{field:'store',expected:'transactional identity migration'});
+      }
+    }catch(error){this.db.close();throw error;}
   }
   transaction(fn) { this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;} }
-  submit(packet,{effectiveModel,preflight,callbackBinding,children,project}={}) {
+  submit(packet,{submittedBy,via,effectiveModel,preflight,callbackBinding,children,project}={}) {
+    if(submittedBy===undefined||via===undefined)fail('AUTH_UNAVAILABLE','Submission identity is required',{field:'identity',expected:'configured credential source available'});
     const hash=digest(packet);
     return this.transaction(()=>{
-      const old=this.db.prepare('SELECT hash,body FROM tasks WHERE owner=? AND idem=?').get(this.ownerId,packet.idempotencyKey);
+      const old=this.db.prepare('SELECT hash,body FROM tasks WHERE owner=? AND submittedBy=? AND idem=?').get(this.ownerId,submittedBy??'',packet.idempotencyKey);
       if(old){if(old.hash!==hash)fail('IDEMPOTENCY_CONFLICT','Idempotency key already belongs to another request');return {created:false,task:JSON.parse(old.body)};}
       for(const id of packet.dependencies) this.get(id);
       const now=Date.now();
-      const task={id:randomUUID(),ownerId:this.ownerId,origin:'codex-bridge',revision:packet.revision,packet,requestHash:hash,status:'queued',phase:'queued',createdAt:now,updatedAt:now,attemptId:randomUUID(),attempt:1,understandingGeneration:0,resultCollected:false,accepted:false,pinned:false,stopConfirmed:true,activeJobs:0,activeChildren:0,children:[],artifactState:packet.role==='implement'?'unresolved':'none',result:{text:'',evidence:[],checks:[],uncertainties:[]},stats:{toolCalls:0},lastEventSeq:0};
+      const task={id:randomUUID(),ownerId:this.ownerId,submittedBy,via:clone(via),origin:'codex-bridge',revision:packet.revision,packet,requestHash:hash,status:'queued',phase:'queued',createdAt:now,updatedAt:now,attemptId:randomUUID(),attempt:1,understandingGeneration:0,resultCollected:false,accepted:false,pinned:false,stopConfirmed:true,activeJobs:0,activeChildren:0,children:[],artifactState:packet.role==='implement'?'unresolved':'none',result:{text:'',evidence:[],checks:[],uncertainties:[]},stats:{toolCalls:0},lastEventSeq:0};
       if(effectiveModel)task.effectiveModel=clone(effectiveModel);
       if(preflight)task.preflight=clone(preflight);
       // The trusted callback target snapshot is resolved from host configuration
@@ -47,7 +106,7 @@ export class TaskStore {
       // a restart, even if the process dies immediately after submission.
       if(project)task.project=clone(project);
       if(Array.isArray(children))task.children=clone(children);
-      this.db.prepare('INSERT INTO tasks VALUES(?,?,?,?,?)').run(task.id,this.ownerId,packet.idempotencyKey,hash,JSON.stringify(task));
+      this.db.prepare('INSERT INTO tasks(id,owner,submittedBy,idem,hash,body) VALUES(?,?,?,?,?,?)').run(task.id,this.ownerId,submittedBy??'',packet.idempotencyKey,hash,JSON.stringify(task));
       this.event(task.id,{type:'task/submitted',revision:task.revision,attemptId:task.attemptId});
       return {created:true,task:clone(task)};
     });
@@ -55,17 +114,18 @@ export class TaskStore {
   get(id) { const r=this.db.prepare('SELECT body FROM tasks WHERE id=? AND owner=?').get(id,this.ownerId);if(!r)fail('TASK_NOT_FOUND','Task does not belong to this bridge');return JSON.parse(r.body); }
   // Read-only idempotency lookup so an already-accepted submission can be reused
   // without a fresh dispatch or a repeated adapter preflight.
-  find(idempotencyKey) { const r=this.db.prepare('SELECT hash,body FROM tasks WHERE owner=? AND idem=?').get(this.ownerId,idempotencyKey);return r?{hash:r.hash,task:JSON.parse(r.body)}:null; }
-  list({projectId,status,includeArchived=false}={}) {return this.db.prepare('SELECT body FROM tasks WHERE owner=? ORDER BY rowid').all(this.ownerId).map(x=>JSON.parse(x.body)).filter(t=>(!projectId||t.packet.projectId===projectId)&&(!status||t.status===status)&&(includeArchived||(!t.archivedAt&&!t.sessionArchivedAt)));}
+  find(idempotencyKey,submittedBy) { if(submittedBy===undefined)fail('AUTH_UNAVAILABLE','Idempotency lookup requires an identity',{field:'identity',expected:'configured credential source available'});const r=this.db.prepare('SELECT hash,body FROM tasks WHERE owner=? AND submittedBy=? AND idem=?').get(this.ownerId,submittedBy??'',idempotencyKey);return r?{hash:r.hash,task:JSON.parse(r.body)}:null; }
+  list({projectId,status,includeArchived=false,submittedBy}={}) {return this.db.prepare('SELECT body FROM tasks WHERE owner=? ORDER BY rowid').all(this.ownerId).map(x=>JSON.parse(x.body)).filter(t=>(submittedBy===undefined||t.submittedBy===submittedBy)&&(!projectId||t.packet.projectId===projectId)&&(!status||t.status===status)&&(includeArchived||(!t.archivedAt&&!t.sessionArchivedAt)));}
   update(id,changes) {
     const task=this.get(id);const next=typeof changes==='function'?changes(clone(task)):{...task,...changes};
-    for(const k of ['id','ownerId','origin','requestHash','revision','attemptId'])if(next[k]!==task[k])fail('IMMUTABLE_IDENTITY',`Cannot replace ${k}`);
+    for(const k of ['id','ownerId','origin','requestHash','revision','attemptId','submittedBy','via'])if(!isDeepStrictEqual(next[k],task[k]))fail('IMMUTABLE_IDENTITY',`Cannot replace ${k}`);
     next.updatedAt=Date.now();this.db.prepare('UPDATE tasks SET body=? WHERE id=? AND owner=?').run(JSON.stringify(next),id,this.ownerId);return clone(next);
   }
   beginAttempt(id,changes={}) {
     const task=this.get(id);
     if(task.status!=='awaiting_approval')fail('ATTEMPT_CONFLICT','Only a checked understanding may start an execution attempt');
     const next={...task,...changes,attemptId:randomUUID(),attempt:task.attempt+1,attemptHistory:[...(task.attemptHistory??[]),{attemptId:task.attemptId,phase:task.phase,status:task.status,sessionId:task.sessionId,requestId:task.requestId}],updatedAt:Date.now()};
+    for(const k of ['submittedBy','via'])if(!isDeepStrictEqual(next[k],task[k]))fail('IMMUTABLE_IDENTITY',`Cannot replace ${k}`);
     this.db.prepare('UPDATE tasks SET body=? WHERE id=? AND owner=?').run(JSON.stringify(next),id,this.ownerId);return clone(next);
   }
   // Checked compare-and-swap mint for the NEXT bounded supervisor round of an owned
