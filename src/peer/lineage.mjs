@@ -32,6 +32,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { HARNESSES, PeerPolicyError, formatChain, parseChain } from './chain.mjs';
 
 export const MAX_ANCESTOR_HOPS = 8;
@@ -107,7 +108,7 @@ function fillEnvValue(env, name, value) {
  * missing values are filled; a present value (including empty) is never overridden.
  */
 function windowsProcessEnv(env) {
-  const child = { ...env };
+  const child = stripBridgeCredentials(env);
   const systemRoot = envValue(child, ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR']) ?? DEFAULT_SYSTEM_ROOT;
   fillEnvValue(child, 'SystemRoot', systemRoot);
   fillEnvValue(child, 'windir', systemRoot);
@@ -174,7 +175,7 @@ export function readProcessTable({ spawnSyncImpl = spawnSync, platform = process
     if (table.size === 0) throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'empty process table');
     return table;
   }
-  const result = spawnSyncImpl('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 20_000 });
+  const result = spawnSyncImpl('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 20_000, env: stripBridgeCredentials(env) });
   if (result.status !== 0 || typeof result.stdout !== 'string') throw new PeerPolicyError('PEER_LINEAGE_UNAVAILABLE', 'cannot read the process table');
   for (const line of result.stdout.split('\n')) {
     const [pid, ppid] = line.trim().split(/\s+/).map(Number);

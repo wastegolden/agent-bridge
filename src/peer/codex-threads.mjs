@@ -29,6 +29,7 @@
 
 import { spawn } from 'node:child_process';
 
+import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
 
 const ARGS_CODE = 'PEER_ARGS_INVALID';
@@ -215,7 +216,7 @@ export function createCodexThreadClient({
   function startChild() {
     let proc;
     try {
-      proc = spawnImpl(executable, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
+      proc = spawnImpl(executable, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: stripBridgeCredentials(process.env) });
     } catch (error) {
       throw new PeerPolicyError(SERVER_CODE, `failed to start the codex app-server: ${error?.message ?? error}`, { method: 'initialize' });
     }

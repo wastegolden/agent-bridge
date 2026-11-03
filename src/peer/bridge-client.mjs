@@ -12,14 +12,15 @@
 //   * the endpoint must be loopback (http://127.0.0.1 or http://localhost, any port or
 //     path). The bearer credential belongs to THIS machine's bridge, so a non-local URL
 //     is refused at construction, before a single byte is sent;
-//   * the credential is resolved per call (DSH_MCP_TOKEN first, the credential file
-//     second) and the resolved token is NEVER placed in an error message or detail.
+//   * the shared resolver enforces disabled/delegated markers and credential source
+//     priority; the resolved token is NEVER placed in an error message or detail.
 //
 // Only Node built-ins are used; the network seam (fetchImpl) and the file seam
 // (readFileImpl) are injectable so the module can be tested without I/O.
 
 import { readFile } from 'node:fs/promises';
 
+import { bridgeViaHeaders, resolveBridgeCredential } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
 
 /** Page size `resultText` asks `bridge_result` for. */
@@ -91,7 +92,8 @@ function parseBridgeError(payload) {
  * @param {Function} [spec.fetchImpl] fetch seam.
  * @param {Function} [spec.readFileImpl] credential-file seam.
  * @param {number} [spec.timeoutMs] per-request AbortSignal timeout.
- * @returns {Readonly<{dossier: Function, resultText: Function, archive: Function, cleanup: Function}>}
+ * @param {Function} [spec.getContext] resolves the verified peer lineage before a call.
+ * @returns {Readonly<{dossier: Function, resultText: Function, archive: Function, cleanup: Function, prepareDelegateCredential: Function}>}
  * @throws {PeerPolicyError} PEER_CONFIG_INVALID for a non-loopback url or a bad seam.
  */
 export function createBridgeClient({
@@ -101,6 +103,7 @@ export function createBridgeClient({
   fetchImpl = globalThis.fetch,
   readFileImpl = readFile,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  getContext = null,
 } = {}) {
   if (!isLocalBridgeUrl(url)) {
     throw new PeerPolicyError(
@@ -122,20 +125,19 @@ export function createBridgeClient({
 
   let sequence = 0;
 
-  /** The bearer token for THIS call: the environment first, the credential file second. */
-  async function resolveToken() {
-    if (typeof env?.[CREDENTIAL_ENV] === 'string' && env[CREDENTIAL_ENV].trim() !== '') {
-      return env[CREDENTIAL_ENV].trim();
+  /** Recovered lineage also prevents file fallback when the MCP environment was filtered. */
+  async function resolveCallCredential(tool) {
+    const context = getContext === null ? null : await getContext();
+    const effectiveEnv = context && !context.isRoot ? {
+      ...env,
+      AGENT_BRIDGE_CHAIN: context.chain.join('>'),
+      AGENT_BRIDGE_ROOT_TASK: context.rootTask ?? '',
+    } : env;
+    const token = await resolveBridgeCredential({ env: effectiveEnv, credentialFile, readFileImpl });
+    if (token === null) {
+      throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'no DSH bridge credential is available or bridge access is disabled', { tool });
     }
-    if (typeof credentialFile === 'string' && credentialFile.trim() !== '') {
-      try {
-        const fromFile = String(await readFileImpl(credentialFile, 'utf8')).trim();
-        if (fromFile !== '') return fromFile;
-      } catch {
-        // A missing or unreadable credential file means "no credential", never a crash.
-      }
-    }
-    return null;
+    return { token, headers: bridgeViaHeaders(effectiveEnv) };
   }
 
   /** Strip the resolved credential out of any externally sourced error text. */
@@ -146,22 +148,15 @@ export function createBridgeClient({
   }
 
   /** One `tools/call` request; resolves with `result.structuredContent`. */
-  async function call(tool, args) {
-    const token = await resolveToken();
-    if (token === null) {
-      throw new PeerPolicyError(
-        'PEER_BRIDGE_UNAVAILABLE',
-        `no DSH bridge credential is available for ${tool}: set ${CREDENTIAL_ENV} or configure the credential file`,
-        { tool },
-      );
-    }
+  async function call(tool, args, credential = null) {
+    const { token, headers } = credential ?? await resolveCallCredential(tool);
     sequence += 1;
     const request = { jsonrpc: '2.0', id: sequence, method: 'tools/call', params: { name: tool, arguments: args } };
     let response;
     try {
       response = await fetchImpl(endpoint, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(request),
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -199,9 +194,23 @@ export function createBridgeClient({
     if (payload.result.isError === true) {
       const { code, message } = parseBridgeError(payload);
       const suffix = message === null ? '' : `: ${message}`;
-      throw new PeerPolicyError('PEER_BRIDGE', redact(`bridge ${tool} refused the call${suffix}`, token), { tool, code });
+      throw new PeerPolicyError('PEER_BRIDGE', redact(`bridge ${tool} refused the call${suffix}`, token), { tool, code: typeof code === 'string' ? redact(code, token) : code });
     }
     return payload.result.structuredContent;
+  }
+
+  /** Resolve once, verify with that exact token, and keep the credential in memory only. */
+  async function prepareDelegateCredential() {
+    const credential = await resolveCallCredential('bridge_capabilities');
+    const capabilities = await call('bridge_capabilities', {}, credential);
+    const identity = capabilities?.controllerIdentity;
+    if (identity?.admin === true) {
+      throw new PeerPolicyError('PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN', 'administrator bridge credentials cannot be delegated');
+    }
+    if (identity?.enabled !== true || identity.admin !== false || typeof identity.self !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(identity.self)) {
+      throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'bridge controller identity could not be verified');
+    }
+    return { token: credential.token, principal: { id: identity.self, admin: false } };
   }
 
   /** The closeout dossier of one owned bridge task. */
@@ -280,5 +289,5 @@ export function createBridgeClient({
     return call('bridge_cleanup', { taskId, dryRun: dryRun === true });
   }
 
-  return Object.freeze({ dossier, resultText, archive, cleanup });
+  return Object.freeze({ dossier, resultText, archive, cleanup, prepareDelegateCredential });
 }

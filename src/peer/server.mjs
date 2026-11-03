@@ -222,7 +222,14 @@ export function createPeerServer({
   if (resolvedBridgeClient === undefined) {
     if (config?.bridge) {
       try {
-        resolvedBridgeClient = createBridgeClient({ url: config.bridge.url, credentialFile: config.bridge.credentialFile ?? null });
+        resolvedBridgeClient = createBridgeClient({
+          url: config.bridge.url, credentialFile: config.bridge.credentialFile ?? null, env,
+          getContext: async () => {
+            const { context, error } = await resolveContext();
+            if (error) throw error;
+            return context;
+          },
+        });
       } catch (error) {
         log({ phase: 'bridge-client', code: error?.code ?? 'PEER_CONFIG_INVALID' });
         resolvedBridgeClient = null;
@@ -410,13 +417,30 @@ export function createPeerServer({
       { target: args.target, mode: args.mode, cwd: args.cwd, sessionId: args.sessionId ?? null, model: args.model ?? null, reasoningEffort: args.reasoningEffort ?? null, addDirs: args.addDirs ?? [], lastMessageFile: allocation.lastMessageFile },
       peer,
     );
+    let bridgeCredential = null;
+    let bridge = { state: 'disabled', reason: args.mode === 'delegate' ? 'PEER_NOT_CONFIGURED' : 'PEER_BRIDGE_READ_ONLY' };
+    if (args.mode === 'delegate' && resolvedBridgeClient) {
+      try {
+        bridgeCredential = await resolvedBridgeClient.prepareDelegateCredential();
+        bridge = { state: 'enabled' };
+      } catch (error) {
+        if (error?.code === 'PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN') throw error;
+        bridge = { state: 'disabled', reason: 'PEER_BRIDGE_UNAVAILABLE' };
+      }
+    }
     const prompt = `${buildPeerPreamble(plan)}\n\n${args.prompt}`;
+    const childEnv = childEnvironment(env, plan.childEnv, { mode: args.mode, bridgeCredential });
+    if (bridgeCredential !== null && config.bridge) {
+      for (const key of Object.keys(childEnv)) if (key.toUpperCase() === 'DSH_BRIDGE_URL') delete childEnv[key];
+      childEnv.DSH_BRIDGE_URL = config.bridge.url;
+    }
     const job = await jobManager.start({
       jobId: allocation.jobId,
       invocation,
       plan,
       prompt,
-      env: childEnvironment(env, plan.childEnv),
+      env: childEnv,
+      bridge,
       timeoutMs: args.timeoutMs ?? limits.timeoutMs,
       title: args.title ?? null,
       cwd: invocation.cwd,

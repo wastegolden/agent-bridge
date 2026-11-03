@@ -21,6 +21,7 @@ import { createWriteStream } from 'node:fs';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
 import { parsePeerOutput } from './cli.mjs';
 import { clearActive, readProcessTable, recordActive } from './lineage.mjs';
@@ -54,7 +55,7 @@ export function defaultKillTree(pid, { spawnImpl = nodeSpawn, platform = process
     return new Promise((resolve) => {
       let killer;
       try {
-        killer = spawnImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', shell: false });
+        killer = spawnImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', shell: false, env: stripBridgeCredentials(process.env) });
       } catch (error) {
         resolve({ ok: false, code: error?.code ?? 'E_SPAWN' });
         return;
@@ -342,6 +343,7 @@ export function createPeerJobs({
     plan,
     prompt,
     env,
+    bridge = null,
     timeoutMs,
     title = null,
     cwd,
@@ -375,6 +377,8 @@ export function createPeerJobs({
         rootTask: plan.rootTask,
         cwd,
         readOnly: invocation.readOnly,
+        // Public bridge status only; the credential stays exclusively in child env.
+        ...(bridge === null ? {} : { bridge: { state: bridge.state, ...(bridge.reason ? { reason: bridge.reason } : {}) } }),
         // What was PASSED to the CLI. null + 'cli-default' means nothing was passed.
         model: model ?? null,
         modelSource: modelSource ?? 'cli-default',
@@ -585,6 +589,7 @@ export function createPeerJobs({
           reasoningEffort: record.reasoningEffort ?? null,
           effortSource: record.effortSource ?? 'cli-default',
           chain: record.chain,
+          ...(record.bridge ? { bridge: record.bridge } : {}),
         });
       } catch {
         // skip unreadable job directories

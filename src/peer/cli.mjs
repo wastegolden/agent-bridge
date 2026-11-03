@@ -27,7 +27,9 @@
 //           no resumable session behind).
 
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
 
 /** Default read-only tool set handed to a Claude Code peer for consult/review. */
@@ -58,20 +60,28 @@ const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 /**
  * Session-identity variables of the CALLING harness. A child harness must start its
  * own session, so these are removed from the inherited environment; everything else
- * (PATH, credentials files, DSH_MCP_TOKEN for a sub-controller) is inherited.
+ * (PATH and unrelated settings) is inherited. Bridge credentials are injected only
+ * after the server verifies the effective delegate credential.
  * Case-insensitive: Windows environment names are case-insensitive.
  */
 const CALLER_SESSION_ENV_RE = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|HOST_SESSION_ID|ENTRYPOINT|CHILD_SESSION|SESSION_ATTENDED|MESSAGING_[A-Z_]+)|CODEX_(THREAD_ID|TURN_ID|CALL_ID|APP_TOOLS_[A-Z_]+))$/i;
 
-export function childEnvironment(baseEnv, chainEnv) {
+export function childEnvironment(baseEnv, chainEnv, { mode, bridgeCredential = null } = {}) {
   const env = {};
-  for (const [key, value] of Object.entries(baseEnv ?? {})) {
+  for (const [key, value] of Object.entries(stripBridgeCredentials(baseEnv))) {
     if (typeof value !== 'string') continue;
     if (CALLER_SESSION_ENV_RE.test(key)) continue;
     if (key.toUpperCase().startsWith('AGENT_BRIDGE_')) continue;
     env[key] = value;
   }
-  return { ...env, ...chainEnv };
+  Object.assign(env, chainEnv);
+  if (mode === 'delegate' && bridgeCredential !== null) {
+    env.DSH_MCP_TOKEN = bridgeCredential.token;
+    env.DSH_BRIDGE_DELEGATED = '1';
+  } else {
+    env.DSH_BRIDGE_DISABLED = '1';
+  }
+  return env;
 }
 
 function assertAbsoluteDir(value, field) {
@@ -214,7 +224,21 @@ export function buildInvocation(request, peer) {
         throw new PeerPolicyError('PEER_CONFIG_INVALID', `claude delegate permission mode must be one of ${CLAUDE_DELEGATE_MODES.join(', ')}`, { field: 'delegatePermissionMode' });
       }
       const allowed = checkToolNames(peer.delegateAllowedTools ?? [], 'delegateAllowedTools');
-      permission = ['--permission-mode', peer.delegatePermissionMode, ...(allowed.length > 0 ? ['--allowedTools', ...allowed] : [])];
+      // Delegate MCP uses the carrier so inherited credentials, disabled markers and
+      // via apply in both directions. The root Claude HTTP plugin stays unchanged.
+      // These names preserve the plugin's existing MCP tool permission prefixes.
+      const mcpConfig = { mcpServers: {
+        'plugin_agent-bridge_dsh_project': {
+          command: process.execPath,
+          args: [fileURLToPath(new URL('../../bin/bridge.mjs', import.meta.url))],
+        },
+        'plugin_agent-bridge_agent_peer': {
+          command: process.execPath,
+          args: [fileURLToPath(new URL('../../bin/peer-mcp.mjs', import.meta.url))],
+          env: { AGENT_BRIDGE_SELF: 'claude-code' },
+        },
+      } };
+      permission = ['--strict-mcp-config', '--mcp-config', JSON.stringify(mcpConfig), '--permission-mode', peer.delegatePermissionMode, ...(allowed.length > 0 ? ['--allowedTools', ...allowed] : [])];
     }
     const args = [
       '-p',

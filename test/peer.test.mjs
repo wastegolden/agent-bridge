@@ -138,7 +138,9 @@ test('claude review exposes only read-only built-ins, no MCP, denies write tools
   assert.equal(consult.args.includes('--no-session-persistence'), true, 'a read-only consult leaves no session behind either');
   const delegate = buildInvocation({ target: 'claude-code', mode: 'delegate', cwd: ABS, sessionId: 'a73c13c2-5006-4731-b1d3-93a817b735bc' }, claudePeer());
   assert.deepEqual(delegate.args.slice(-2), ['--permission-mode', 'acceptEdits']);
-  assert.ok(!delegate.args.includes('--strict-mcp-config'), 'a sub-controller keeps its MCP tools (DSH bridge, peers)');
+  assert.ok(delegate.args.includes('--strict-mcp-config'), 'a sub-controller uses credential-aware stdio MCP entries');
+  const delegateMcp = JSON.parse(delegate.args[delegate.args.indexOf('--mcp-config') + 1]);
+  assert.deepEqual(Object.keys(delegateMcp.mcpServers).sort(), ['plugin_agent-bridge_agent_peer', 'plugin_agent-bridge_dsh_project']);
   assert.ok(!delegate.args.includes('--no-session-persistence'), 'a delegate session is persisted so it can be continued');
   assert.equal(delegate.args[delegate.args.indexOf('--resume') + 1], 'a73c13c2-5006-4731-b1d3-93a817b735bc');
 });
@@ -236,7 +238,7 @@ test('the child environment drops caller identity and inherited chain in any let
     },
     { AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_CHAIN: 'claude-code>codex' },
   );
-  assert.deepEqual(env, { PATH: 'p', DSH_MCP_TOKEN: 't', AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_CHAIN: 'claude-code>codex' });
+  assert.deepEqual(env, { PATH: 'p', DSH_BRIDGE_DISABLED: '1', AGENT_BRIDGE_SELF: 'codex', AGENT_BRIDGE_CHAIN: 'claude-code>codex' });
 });
 
 test('output parsers read the real CLI shapes', () => {
