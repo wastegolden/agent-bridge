@@ -1,8 +1,17 @@
 import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {createDispatcher,createMcpHandler} from '../src/mcp.mjs';
-test('authentication and transport boundaries protect mutations',async()=>{
+import {loadControllerRegistry} from '../src/controller-auth.mjs';
+const context={principal:{id:'codex',admin:false},via:null,controllerIds:['codex']};
+function registryFor(t,token){
+ const directory=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-mcp-auth-'));
+ t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+ const tokenFile=path.join(directory,'token.txt');fs.writeFileSync(tokenFile,token);
+ return loadControllerRegistry([{id:'codex',tokenFile}]);
+}
+test('authentication and transport boundaries protect mutations',async(t)=>{
  let calls=0;const service={submit:async p=>{calls++;return {text:p.text};}};const token='test-only-credential-'.repeat(3);
- const server=http.createServer(createMcpHandler(service,{token}));await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ const server=http.createServer(createMcpHandler(service,{registry:registryFor(t,token)}));await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const url=`http://127.0.0.1:${server.address().port}`;
  try{
   const call=async(body,headers={})=>fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,...headers},body:JSON.stringify(body)});
@@ -13,11 +22,11 @@ test('authentication and transport boundaries protect mutations',async()=>{
   r=await call({jsonrpc:'2.0',id:4,method:'ping'},{Origin:'http://evil.invalid'});assert.equal(r.status,403);
  }finally{await new Promise(r=>server.close(r));}
 });
-test('tools/list advertises the complete task packet and errors expose only bounded details',async()=>{
+test('tools/list advertises the complete task packet and errors expose only bounded details',async(t)=>{
  const token='test-only-credential-'.repeat(3);
  const secretPath='C:/dev/private-material.txt';const secretHash='f'.repeat(64);
  const service={submit:async()=>{throw Object.assign(new Error('schemaVersion must be the integer 1, not the string "1.0" or any other value'),{code:'INVALID_PACKET',details:{field:'schemaVersion',expected:'integer 1',path:secretPath,sha256:secretHash}});}};
- const server=http.createServer(createMcpHandler(service,{token}));await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ const server=http.createServer(createMcpHandler(service,{registry:registryFor(t,token)}));await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const url=`http://127.0.0.1:${server.address().port}`;
  const call=body=>fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify(body)});
  try{
@@ -71,7 +80,7 @@ test('bridge_capabilities keeps the live child inventory and the adapter child/j
    commandJobsStatus:()=>commandJobs,
   },
  };
- const caps=await createDispatcher(service)('bridge_capabilities',{});
+ const caps=await createDispatcher(service)('bridge_capabilities',{},context);
  // Inventory keeps the SAME shape it had before this change.
  assert.ok(Array.isArray(caps.supervisor.children),'children must stay the live inventory array');
  assert.deepEqual(caps.supervisor.children,inventory);

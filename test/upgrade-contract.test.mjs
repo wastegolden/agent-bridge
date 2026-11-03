@@ -38,12 +38,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { TOOLS, createDispatcher, createMcpHandler } from '../src/mcp.mjs';
+import { loadControllerRegistry } from '../src/controller-auth.mjs';
 import { DshAdapter } from '../src/dsh-adapter.mjs';
 import { WorkspaceManager } from '../src/workspaces.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODES = WorkspaceManager.ERROR_CODES;
 const IDENTITY_CODE = CODES.GIT_IDENTITY_UNAVAILABLE ?? 'E_GIT_IDENTITY_UNAVAILABLE';
+const context = { principal: { id: 'codex', admin: false }, via: null, controllerIds: ['codex'] };
 
 /* ------------------------------------------------------------------ *
  * temp-dir tracker and cleanup
@@ -308,7 +310,10 @@ function assertJsonSafe(value, label) {
 
 test('A: tools/list publishes the shared checks schema with the contract fields and ranges', async () => {
   const token = 'upgrade-contract-token-'.repeat(2);
-  const server = http.createServer(createMcpHandler({}, { token }));
+  const tokenFile = path.join(TMP_BASE, 'controller.token');
+  writeFileSync(tokenFile, token);
+  const registry = loadControllerRegistry([{ id: 'codex', tokenFile }]);
+  const server = http.createServer(createMcpHandler({}, { registry }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   let listed;
@@ -464,6 +469,7 @@ function refreshFixture(repository, overrides = {}) {
       baseCommit: 'a'.repeat(40)
     },
     status: 'completed',
+    submittedBy: 'codex',
     stopConfirmed: true,
     activeJobs: 0,
     review: { head: 'b'.repeat(40), contractVersion: 'v1', passed: true },
@@ -498,7 +504,7 @@ test('A: bridge_workspace_refresh invalidates the stored review before a throwin
       taskId: task.id,
       targetRepository: repository,
       expectedTargetHead: 'c'.repeat(40)
-    }),
+    }, context),
     (error) => error === failure
   );
 
@@ -539,7 +545,7 @@ test('A: bridge_workspace_refresh keeps the review invalidated after a successfu
     taskId: task.id,
     targetRepository: repository,
     expectedTargetHead: 'e'.repeat(40)
-  });
+  }, context);
   assert.equal(result.refreshed, true);
   assert.equal(task.review, null, 'a completed refresh must leave the old review invalidated');
 });
@@ -560,7 +566,7 @@ test('A: bridge_workspace_refresh does not invalidate the review when an earlier
       taskId: settled.id,
       targetRepository: repository,
       expectedTargetHead: 'c'.repeat(40)
-    })
+    }, context)
   );
   assert.equal(settledError.code, 'TASK_NOT_SETTLED');
   assert.deepEqual(log, [], 'a failed task gate must not invalidate the review or call refresh');
@@ -576,7 +582,7 @@ test('A: bridge_workspace_refresh does not invalidate the review when an earlier
       taskId: mismatched.id,
       targetRepository: otherRepository,
       expectedTargetHead: 'c'.repeat(40)
-    })
+    }, context)
   );
   assert.equal(mismatchError.code, 'TARGET_MISMATCH');
   assert.deepEqual(log, [], 'a target gate failure must not invalidate the review or call refresh');

@@ -1,5 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import http from 'node:http';import {createHash} from 'node:crypto';
 import {TaskStore} from '../src/store.mjs';import {BridgeService} from '../src/service.mjs';import {TOOLS,createDispatcher,createMcpHandler} from '../src/mcp.mjs';
+import {loadControllerRegistry} from '../src/controller-auth.mjs';
+const context={principal:{id:'codex',admin:false},via:null,controllerIds:['codex']};
+const identity={submittedBy:'codex',via:null};
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn){for(let i=0;i<200;i++){if(fn())return;await sleep(5);}assert.fail('condition timed out');}
@@ -28,7 +31,7 @@ function fixture(){
 
 test('bridge_dossier returns a fresh closeout dossier that never copies material text or mutates the store',async()=>{
  const f=fixture();try{
-  const submitted=await f.service.submit(packet(f.directory));
+  const submitted=await f.service.submit(packet(f.directory),identity);
   await until(()=>f.starts.length===1);
   f.done(submitted.id,'the full result text');
   await until(()=>f.service.get(submitted.id).status==='completed');
@@ -48,7 +51,7 @@ test('bridge_dossier returns a fresh closeout dossier that never copies material
   const again=f.service.dossier(submitted.id);
 
   // Exactly the specified keys, no more and no fewer.
-  assert.deepEqual(Object.keys(dossier).sort(),['acknowledgement','archive','attempt','attemptId','contractVersion','controller','createdAt','effectiveModel','integration','phase','projectId','refresh','request','result','review','revision','role','rootTask','rounds','schemaVersion','sessionId','stats','status','stop','taskId','title','updatedAt','workspace']);
+  assert.deepEqual(Object.keys(dossier).sort(),['acknowledgement','archive','attempt','attemptId','contractVersion','controller','createdAt','effectiveModel','integration','phase','projectId','refresh','request','result','review','revision','role','rootTask','rounds','schemaVersion','sessionId','stats','status','stop','submittedBy','taskId','title','updatedAt','via','workspace']);
   assert.deepEqual(Object.keys(dossier.request).sort(),['acceptance','budget','cwd','materials','metadata','model','objective','scope','workspace']);
   assert.deepEqual(Object.keys(dossier.acknowledgement).sort(),['accepted','artifactState','pinned','resultCollected']);
   assert.deepEqual(Object.keys(dossier.stop).sort(),['activeJobs','stopConfirmed']);
@@ -67,6 +70,8 @@ test('bridge_dossier returns a fresh closeout dossier that never copies material
   assert.equal(typeof dossier.createdAt,'number');
   assert.equal(typeof dossier.updatedAt,'number');
   assert.equal(dossier.controller,'codex');
+  assert.equal(dossier.submittedBy,'codex');
+  assert.equal(dossier.via,null);
   assert.equal(dossier.rootTask,'root-1');
   assert.equal(dossier.sessionId,`session-${submitted.id}`);
   assert.equal(dossier.effectiveModel.model,'deepseek-flash');
@@ -140,7 +145,9 @@ test('bridge_dossier is advertised, dispatches to the read-only method and refus
   // The advertised catalog is the array the real tools/list method serves; prove it
   // through the transport too.
   const token='dossier-test-token-'.repeat(2);
-  const server=http.createServer(createMcpHandler({},{token}));
+  const tokenFile=path.join(f.directory,'token.txt');fs.writeFileSync(tokenFile,token);
+  const registry=loadControllerRegistry([{id:'codex',tokenFile}]);
+  const server=http.createServer(createMcpHandler({},{registry}));
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   try{
    const listed=await (await fetch(`http://127.0.0.1:${server.address().port}`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})})).json();
@@ -150,23 +157,23 @@ test('bridge_dossier is advertised, dispatches to the read-only method and refus
    assert.equal(advertised.inputSchema.properties.taskId.type,'string');
   }finally{server.closeAllConnections?.();await new Promise(r=>server.close(r));}
 
-  const submitted=await f.service.submit(packet(f.directory));
+  const submitted=await f.service.submit(packet(f.directory),identity);
   await until(()=>f.starts.length===1);
   f.done(submitted.id,'done');
   await until(()=>f.service.get(submitted.id).status==='completed');
 
   const call=createDispatcher(f.service);
-  const dispatched=await call('bridge_dossier',{taskId:submitted.id});
+  const dispatched=await call('bridge_dossier',{taskId:submitted.id},context);
   assert.deepEqual(dispatched,f.service.dossier(submitted.id));
 
   const before=JSON.stringify(f.store.get(submitted.id));
-  await call('bridge_dossier',{taskId:submitted.id});
+  await call('bridge_dossier',{taskId:submitted.id},context);
   assert.equal(JSON.stringify(f.store.get(submitted.id)),before,'the dossier must not change task state');
 
-  await assert.rejects(()=>call('bridge_dossier',{}),{code:'INVALID_ARGUMENTS'});
-  await assert.rejects(()=>call('bridge_dossier',{taskId:submitted.id,extra:1}),{code:'INVALID_ARGUMENTS'});
+  await assert.rejects(()=>call('bridge_dossier',{},context),{code:'INVALID_ARGUMENTS'});
+  await assert.rejects(()=>call('bridge_dossier',{taskId:submitted.id,extra:1},context),{code:'INVALID_ARGUMENTS'});
   // An unknown id is refused with the same typed error the other read tools use.
-  await assert.rejects(()=>call('bridge_dossier',{taskId:'missing-task'}),{code:'TASK_NOT_FOUND'});
+  await assert.rejects(()=>call('bridge_dossier',{taskId:'missing-task'},context),{code:'TASK_NOT_FOUND'});
   assert.throws(()=>f.service.dossier('missing-task'),{code:'TASK_NOT_FOUND'});
  }finally{f.close();}
 });
