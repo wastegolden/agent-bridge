@@ -245,7 +245,7 @@ test('a follow-up continues an approved understanding-gated task in execution mo
     assert.equal(running.executionApproved, true);
     const call = f.followupCalls[0];
     assert.equal(call.executionApproved, true);
-    assert.equal(call.understandingRequired, true);
+    assert.equal(call.packet.understandingRequired, true);
     assert.equal(call.sessionId, before.sessionId);
     assert.equal(call.attemptId, out.followup.attemptId);
     f.done(submitted.id, 'gated follow answer');
