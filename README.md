@@ -42,14 +42,17 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - 网络也由任务包声明，只有被授予时才可用；
 - 生命周期是 审查（review）→ 集成（integrate）→ 确认（acknowledge）→ 归档 / 清理（archive / cleanup），每一步都要求前一步的真实证据。
 
-它暴露 19 个 `bridge_*` 工具（宿主 `bridge_capabilities` 报告的 `version` 是 **1.5.0**，与插件版本 1.7.0 不同）：
+它暴露 20 个 `bridge_*` 工具（6 读、1 提交、13 变更；宿主 `bridge_capabilities` 报告的 `version` 是 **1.5.0**，与插件版本 1.7.0 不同）：
 
 - 任务：`bridge_submit`、`bridge_check`、`bridge_result`、`bridge_dossier`
 - 授权：`bridge_approve`、`bridge_clarify`
+- 追问：`bridge_followup`
 - 控制：`bridge_cancel`、`bridge_reconcile`、`bridge_list`、`bridge_pause`、`bridge_resume`
 - 收尾：`bridge_acknowledge`、`bridge_archive`、`bridge_cleanup`
 - 目录：`bridge_models`、`bridge_capabilities`
 - 工作区：`bridge_workspace_review`、`bridge_workspace_refresh`、`bridge_workspace_integrate`
+
+每个工具只属于一个类别：读工具不看归属；`bridge_submit` 把任务绑定到当前控制器；变更工具要求任务属于当前控制器，或由管理员带 `override:{reason}` 越权（先写审计意图，再执行）。控制器身份、审计和迁移的完整说明见 [docs/controller-identity.md](docs/controller-identity.md)。
 
 ### dsh_project
 
@@ -86,7 +89,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - **Windows**（已实测；其他平台有代码路径但未验证）。
 - **Claude Code 和/或 Codex**。
 - peer 调用要求每一侧的无头 CLI 各自登录过一次。
-- 用户环境变量 **`DSH_MCP_TOKEN`**，值是 DSH 宿主的桥令牌（即宿主配置 `credentialFile` 指向的文件内容）。设好后要重开 Claude / Codex 才会读到。
+- 每个根控制器一个 bearer 令牌文件（宿主配置 `controllers[].tokenFile`）；Claude Code / Codex 通过 `DSH_MCP_TOKEN` 发送**自己那个控制器**的令牌，不要多个控制器共用一个旧令牌。设好后要重开 Claude / Codex 才会读到。
 
 ## 安装
 
@@ -110,13 +113,20 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 
 4. 启动 DSH。
 
-宿主配置示例（字段见下方，路径用你自己的）：
+如果是从共享 `credentialFile` 升级到控制器身份（`controllers`），不要直接启动：按 [docs/controller-identity.md](docs/controller-identity.md) 的升级/回滚章节执行整机排空、停止、备份和两次重启（overlap 配置 → 移除 `legacy` 的 final 配置）。旧的顶层认证字段会被拒绝挂载。
+
+宿主配置示例（字段见下方，路径用你自己的；完整校验规则见 [docs/controller-identity.md](docs/controller-identity.md)）：
 
 ```json
 {
   "dataDirectory": "<DSH_HOME>/codex-bridge-v1",
   "ownerId": "<owner-id>",
-  "credentialFile": "<某个私有目录>/bridge-token.txt",
+  "controllers": [
+    { "id": "claude-code", "tokenFile": "<私有目录>/credentials/claude-code.token" },
+    { "id": "codex", "tokenFile": "<私有目录>/credentials/codex.token" },
+    { "id": "operator", "tokenFile": "<私有目录>/credentials/operator.token", "admin": true }
+  ],
+  "identityMigrationBackupDirectory": "F:/temp/agent-bridge-upstream/backups",
   "maxConcurrent": 4,
   "retention": { "successDays": 7, "failureDays": 30 },
   "gitExecutable": "C:/Program Files/Git/cmd/git.exe",
@@ -131,13 +141,14 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 ```
 
 - `ownerId` 是持久化身份：沿用已有安装的值，否则旧任务认领不到。缺省值是 `codex-bridge-v1`。
-- `credentialFile` 的文件内容就是 bearer 令牌，客户端通过 `DSH_MCP_TOKEN` 发送它。**宿主不会替你生成令牌**，安装前自己生成一个随机值写进这个文件，再把同一个值设成用户环境变量 `DSH_MCP_TOKEN`：
+- `controllers` 是必填数组（1–32 项）。每个控制器有自己的 bearer 令牌文件；`id` 匹配 `^[a-z][a-z0-9-]{0,63}$` 且唯一，`tokenFile` 是绝对本地路径，文件内容去掉外围空白后必须是 24–512 个可打印 ASCII 字符且内部无空白（新令牌用 `randomBytes(32)` 生成 64 位十六进制）。重复令牌或弱令牌会拒绝启动；`admin: true` 只给真正需要越权审计的 `operator`。配置里只保存路径，不保存令牌。
+- `identityMigrationBackupDirectory`：已有旧任务库（`user_version=0`）迁移到控制器身份前必需；宿主会先做一致性快照再迁移。旧的顶层 `token` / `credentialFile` / `tokenEnv` 认证字段会被拒绝，必须迁移到 `controllers`。
+- 客户端仍通过 `DSH_MCP_TOKEN` 发送 bearer 令牌，但每个根控制器使用自己那份文件；部署工具会生成缺失的令牌文件并加载对应客户端的令牌，已存在的文件只校验、不覆盖：
 
   ```bash
-  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <某个私有目录>/bridge-token.txt
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <私有目录>/credentials/<controller-id>.token
   ```
 
-  不写 `credentialFile` 时，宿主改从它自己进程环境里的 `DSH_MCP_TOKEN` 读令牌。
 - `maxConcurrent` 缺省 4。
 - `retention` 是 DSH 任务会话的保留期（缺省 7 / 30 天），与下面 agent-peer 记录的 3 / 30 天是两套策略。
 - `rootCallbackGrants`、`eventWake` 是可选的控制器唤醒配置，不写就是关闭。`eventWake.maxSummaryChars` 如果给出，必须正好是 8192（默认值），这是固定的线路上限。
@@ -170,7 +181,7 @@ echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/ag
 
 适合没有 git 历史的解压包，也适合已经手工配置过的机器。克隆或下载本仓库后：
 
-1. 复制 `scripts/deploy.example.json` 到仓库外，改成本机路径。必填三项：`deployRoot`（部署根，下面会有 `plugin/`、`config/`、`state/` 和 Claude 的本地插件市场）、`nodePath`、`bridgeUrl`。可选：`repo`（导出这个 git 仓库的 HEAD，缺省则直接复制包目录）、`gitExecutable`、`peerConfig`、`credentialFile`、`codexPluginDir`、`codexExecutable`、`codexPluginId`、`codexMarketplace`、`claudeExecutable`、`claudePluginId`。可执行文件路径可以用整段的 `*`，脚本取最新匹配的那份（两个桌面端都把 CLI 放在随更新变化的版本/哈希目录里）。
+1. 复制 `scripts/deploy.example.json` 到仓库外，改成本机路径。必填三项：`deployRoot`（部署根，下面会有 `plugin/`、`config/`、`state/` 和 Claude 的本地插件市场）、`nodePath`、`bridgeUrl`。可选：`repo`（导出这个 git 仓库的 HEAD，缺省则直接复制包目录）、`gitExecutable`、`peerConfig`、`identity`（`credentialDirectory`、`migrationBackupDirectory`、可选 `legacyTokenFile`；启用 identity 时旧的共享 `credentialFile` 配置会被拒绝）、`codexPluginDir`、`codexExecutable`、`codexPluginId`、`codexMarketplace`、`claudeExecutable`、`claudePluginId`。可执行文件路径可以用整段的 `*`，脚本取最新匹配的那份（两个桌面端都把 CLI 放在随更新变化的版本/哈希目录里）。
 2. 先看计划，再执行：
 
 ```bash
@@ -248,8 +259,9 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 ## 验证
 
-1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.5.0`（插件版本是 1.7.0，两者不同）。
+1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.5.0`（插件版本是 1.7.0，两者不同）。`controllerIdentity.self` / `admin` 应与你使用的控制器令牌一致，`controllers` 列出已配置的 ID。
 2. 调用 `peer_capabilities`：Claude 端 `self` 应是 `claude-code`，Codex 端应是 `codex`；`chain` 显示自己在链上的位置，每个 peer 的每个模式会明确告诉你是否允许，以及不允许时的错误码。
+3. 从两个根各跑一个可丢弃 delegate（Claude → Codex、Codex → Claude）：delegate 应只看到插件的两个 MCP server，并仍能提交一个便宜的 DSH 任务；用户自己的其他 MCP server 不会出现（这是 1.7.0 之后的明确行为变化）。
 
 ## 用法
 
@@ -265,11 +277,15 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 ## 安全模型
 
-- **令牌**：宿主端点只接受带正确 bearer 令牌的请求；令牌来自用户环境变量 `DSH_MCP_TOKEN`，不写进插件清单。
+- **令牌与归属**：每个控制器一个 bearer 令牌文件，宿主只接受正确令牌，并据此确定请求主体；`task.submittedBy` 由服务端写入且不可变。读工具不限制归属；变更工具要求本人任务，或管理员带显式 `override:{reason}`（先持久化审计意图，再执行，最后写结果审计）。管理员令牌不会传给子进程。
+- **历史任务与越权**：历史任务 `submittedBy:null`，只有管理员加非空原因（≤500 字符）才能变更；`metadata.controller`、`parentTaskId` 和 `via` 都只是审计/协调信息，不是权限。
+- **委派继承根凭据**：delegate 继承根控制器（非管理员）的凭据，其任务属于根主体；同一控制器的会话共享权限，delegate 可以修改同一根主体的其他任务——这是“同机协作 agent”威胁模型内已接受的边界。最终验收仍由根控制器负责。
 - **DSH 任务不能开 shell**：当前适配器直接拒绝 `allowShell: true`，不给绕过口。
 - **路径围栏**：worker 只能读 `scope.readRoots`、写 `writeRoots`；越界是明确的拒绝，不是提示。
 - **网络**：只有任务包显式授予时才可用。
 - **只读 peer 不能写**：`consult` / `review` 给对端只读沙箱和只读工具集，并禁用可能动手的插件；Claude 一侧只读运行不留会话。
+- **Claude delegate 的 MCP 面收窄**：delegate 使用 `--strict-mcp-config`，MCP 配置只含插件的两个入口，用户自己的其他 MCP server 被有意排除（相对 1.7.0 的明确行为变化）；升级后按“验证”一节做双向冒烟。
+- **凭据不回落**：delegate 或子进程缺少环境令牌时，carrier 和 peer client 直接拒绝，不读本机凭据文件兜底；令牌不写入作业记录、prompt、argv 或日志。
 - **委派链强制**：不能指向自己、不能调用链上已有的 harness、跳数与 delegate 深度有上限；非法链直接拒绝而不是修补。
 - **清理只清记录过的会话**：清扫器只动收尾记录里列出的会话，且记录文件必须存在；不在记录里的会话永远不动。
 - **数据不出机器**：除各 harness 本来就在做的模型调用外，没有别的东西离开这台机器。
@@ -283,6 +299,7 @@ Claude Code 和 Codex 应当指向**同一个**配置文件，这样两边看到
 
 ## 文档
 
+- [docs/controller-identity.md](docs/controller-identity.md)：控制器身份、凭据与令牌文件、6/1/13 工具分类与越权审计、client-declared `via`、存储迁移、升级/回滚与双向冒烟
 - [docs/reference/dsh-bridge-reference.zh.md](docs/reference/dsh-bridge-reference.zh.md)：宿主桥的深入说明（中文，1.2/1.3 时期的技术参考）
 - [docs/event-wake.md](docs/event-wake.md)：事件唤醒（durable outbox → 控制器）
 - [docs/long-supervisor.md](docs/long-supervisor.md)：长任务 supervisor（edition 1）

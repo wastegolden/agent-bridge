@@ -42,14 +42,17 @@ The host bridge is a DSH plugin. It mounts the MCP endpoint `/mcp/codex-bridge-v
 - network access is declared by the packet too, and is available only when granted;
 - the lifecycle is review → integrate → acknowledge → archive / cleanup, and every step requires the previous step's real evidence.
 
-It exposes 19 `bridge_*` tools (the host's `bridge_capabilities` reports `version` **1.5.0**, which is not the plugin version 1.7.0):
+It exposes 20 `bridge_*` tools (6 read, 1 submit, 13 mutate; the host's `bridge_capabilities` reports `version` **1.5.0**, which is not the plugin version 1.7.0):
 
 - tasks: `bridge_submit`, `bridge_check`, `bridge_result`, `bridge_dossier`
 - authorization: `bridge_approve`, `bridge_clarify`
+- follow-up: `bridge_followup`
 - control: `bridge_cancel`, `bridge_reconcile`, `bridge_list`, `bridge_pause`, `bridge_resume`
 - closeout: `bridge_acknowledge`, `bridge_archive`, `bridge_cleanup`
 - catalogue: `bridge_models`, `bridge_capabilities`
 - workspaces: `bridge_workspace_review`, `bridge_workspace_refresh`, `bridge_workspace_integrate`
+
+Each tool has exactly one category: read tools do not check ownership; `bridge_submit` binds the task to the current controller; mutate tools require the task to belong to the current controller, or an administrator supplying `override:{reason}` (audit intent is written before execution, then the result audit). The complete controller-identity, audit and migration reference is [docs/controller-identity.md](docs/controller-identity.md).
 
 ### dsh_project
 
@@ -86,7 +89,7 @@ For compatibility with existing installs the persisted ids are still the old one
 - **Windows** (verified; other platforms have code paths but are untested).
 - **Claude Code and/or Codex**.
 - Peer calls need each headless CLI to be logged in once.
-- The user environment variable **`DSH_MCP_TOKEN`**, whose value is the bridge token of the DSH host (the content of the file `credentialFile` points at). Restart Claude / Codex after setting it.
+- One bearer token file per root controller (host `controllers[].tokenFile`); Claude Code / Codex send **their own controller's** token through `DSH_MCP_TOKEN` — do not share one old token across controllers. Restart Claude / Codex after setting it.
 
 ## Install
 
@@ -110,13 +113,20 @@ Both scripts accept `--dry-run` (`--plan` is a synonym) to print the plan first.
 
 4. Start DSH.
 
-Example host config (replace the paths):
+When upgrading from the shared `credentialFile` authentication to controller identity (`controllers`), do not simply start the host: follow the upgrade/rollback section of [docs/controller-identity.md](docs/controller-identity.md) — drain the whole host, stop, back up, and do the two restarts (overlap config, then the final config without `legacy`). The old top-level authentication keys are refused at mount.
+
+Example host config (replace the paths; the full validation rules are in [docs/controller-identity.md](docs/controller-identity.md)):
 
 ```json
 {
   "dataDirectory": "<DSH_HOME>/codex-bridge-v1",
   "ownerId": "<owner-id>",
-  "credentialFile": "<somewhere private>/bridge-token.txt",
+  "controllers": [
+    { "id": "claude-code", "tokenFile": "<private>/credentials/claude-code.token" },
+    { "id": "codex", "tokenFile": "<private>/credentials/codex.token" },
+    { "id": "operator", "tokenFile": "<private>/credentials/operator.token", "admin": true }
+  ],
+  "identityMigrationBackupDirectory": "F:/temp/agent-bridge-upstream/backups",
   "maxConcurrent": 4,
   "retention": { "successDays": 7, "failureDays": 30 },
   "gitExecutable": "C:/Program Files/Git/cmd/git.exe",
@@ -131,13 +141,14 @@ Example host config (replace the paths):
 ```
 
 - `ownerId` is a persisted identity: keep the value an existing install used, or old tasks cannot be claimed. The default is `codex-bridge-v1`.
-- The content of `credentialFile` is the bearer token; clients send it as `DSH_MCP_TOKEN`. **The host does not generate a token for you**: before installing, write a random value into that file and set the same value as the user environment variable `DSH_MCP_TOKEN`:
+- `controllers` is a required array (1–32). Each controller has its own bearer token file; `id` matches `^[a-z][a-z0-9-]{0,63}$` and is unique, `tokenFile` is an absolute local path, and the trimmed file content must be 24–512 printable ASCII characters with no internal whitespace (a new token is 64 hex characters from `randomBytes(32)`). Duplicate or weak tokens refuse the mount; give `admin: true` only to the real `operator`. The configuration stores paths, never tokens.
+- `identityMigrationBackupDirectory`: required before migrating an existing (`user_version=0`) task store; the host takes a consistent snapshot first. The old top-level `token` / `credentialFile` / `tokenEnv` authentication fields are refused and must be migrated to `controllers`.
+- Clients still send the bearer token through `DSH_MCP_TOKEN`, but each root controller uses its own file. Deployment tooling creates missing token files and loads the matching client token; an existing file is validated and kept, never overwritten:
 
   ```bash
-  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <somewhere private>/bridge-token.txt
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <private>/credentials/<controller-id>.token
   ```
 
-  Without `credentialFile`, the host reads the token from `DSH_MCP_TOKEN` in its own process environment.
 - `maxConcurrent` defaults to 4.
 - `retention` is the retention of DSH task sessions (default 7 / 30 days). It is a different policy from the 3 / 30 days of the agent-peer records below.
 - `rootCallbackGrants` and `eventWake` are optional controller wake-ups; absent means off. If `eventWake.maxSummaryChars` is given it must be exactly 8192 (the default) — that is the fixed wire limit.
@@ -170,7 +181,7 @@ Then **quit the Claude desktop app completely and reopen it**.
 
 Works for an extracted package without git history, and for a machine that is already hand-configured. Clone or download this repository, then:
 
-1. Copy `scripts/deploy.example.json` outside the repository and edit it. Three fields are required: `deployRoot` (holds `plugin/`, `config/`, `state/` and the Claude local marketplace below it), `nodePath` and `bridgeUrl`. Optional: `repo` (export the committed HEAD of this git repository; without it the package directory is copied as is), `gitExecutable`, `peerConfig`, `credentialFile`, `codexPluginDir`, `codexExecutable`, `codexPluginId`, `codexMarketplace`, `claudeExecutable`, `claudePluginId`. Executable paths may use whole `*` segments; the newest match is used, because both desktop apps install their CLI under version/hash directories that change on update.
+1. Copy `scripts/deploy.example.json` outside the repository and edit it. Three fields are required: `deployRoot` (holds `plugin/`, `config/`, `state/` and the Claude local marketplace below it), `nodePath` and `bridgeUrl`. Optional: `repo` (export the committed HEAD of this git repository; without it the package directory is copied as is), `gitExecutable`, `peerConfig`, `identity` (`credentialDirectory`, `migrationBackupDirectory`, optional `legacyTokenFile`; enabling identity refuses the old shared `credentialFile` configuration), `codexPluginDir`, `codexExecutable`, `codexPluginId`, `codexMarketplace`, `claudeExecutable`, `claudePluginId`. Executable paths may use whole `*` segments; the newest match is used, because both desktop apps install their CLI under version/hash directories that change on update.
 2. Plan first, then run:
 
 ```bash
@@ -248,8 +259,9 @@ There is deliberately no free-form argument list: every CLI flag is generated fr
 
 ## Verify
 
-1. Call `bridge_capabilities`: the host should report `version` `1.5.0` (the plugin version is 1.7.0 — these differ).
+1. Call `bridge_capabilities`: the host should report `version` `1.5.0` (the plugin version is 1.7.0 — these differ). `controllerIdentity.self` / `admin` must match the controller token you are using, and `controllers` lists the configured IDs.
 2. Call `peer_capabilities`: `self` should be `claude-code` on the Claude side and `codex` on the Codex side; `chain` shows your position, and every peer/mode pair states whether it is allowed and, if not, with which error code.
+3. Run one disposable delegate in each direction (Claude → Codex, Codex → Claude): the delegate should see only the plugin's two MCP servers and still submit one cheap DSH task; the user's other MCP servers must be absent (an explicit behaviour change since 1.7.0).
 
 ## Usage
 
@@ -265,11 +277,15 @@ There is one rule: **the harness you are talking to is the root controller of th
 
 ## Security model
 
-- **Token**: the host endpoint accepts only requests with the correct bearer token; the token comes from the user environment variable `DSH_MCP_TOKEN` and is never written into a plugin manifest.
+- **Tokens and ownership**: one bearer token file per controller; the host accepts only the correct token and derives the request principal from it. `task.submittedBy` is written by the server and immutable. Read tools do not check ownership; mutate tools require your own task, or an administrator supplying `override:{reason}` (durable audit intent, then execution, then a result audit). Administrator tokens are never forwarded to child processes.
+- **History and override**: historical tasks have `submittedBy:null` and need an administrator plus a nonblank reason (≤500 characters). `metadata.controller`, `parentTaskId` and `via` are audit/coordination information, never authority.
+- **Delegation inherits the root credential**: a delegate inherits the root controller's non-administrator credential, so its tasks belong to the root principal; sessions sharing one controller ID share permissions, and a delegate may modify other tasks of the same root principal — an accepted boundary of the cooperating-agent threat model. Final acceptance remains the root controller's responsibility.
 - **DSH tasks cannot run a shell**: the current adapter rejects `allowShell: true` outright, with no workaround.
 - **Path fences**: a worker may only read `scope.readRoots` and write `writeRoots`; going outside is an explicit refusal, not a hint.
 - **Network**: available only when the packet grants it.
 - **Read-only peers cannot write**: `consult` / `review` give the peer a read-only sandbox and a read-only tool set and disable plugins that could act; a read-only Claude run leaves no session behind.
+- **Claude delegate MCP surface is narrowed**: a delegate runs with `--strict-mcp-config` and an MCP configuration containing only the plugin's two entries; the user's other MCP servers are deliberately excluded (an explicit behaviour change from 1.7.0). Smoke-test both directions after an upgrade (see Verify).
+- **No credential fallback**: when a delegate or child loses its environment token, the carrier and peer client refuse instead of reading a local credential file; tokens are never written to job records, prompts, argv or logs.
 - **Delegation chain enforcement**: no self target, no harness already on the chain, bounded hops and delegate depth; a malformed chain is refused rather than repaired.
 - **Only recorded sessions are cleaned**: the sweeper touches only sessions listed in a closeout record, and only while the record file exists; anything not in a record is never touched.
 - **Nothing leaves the machine**: apart from the model calls the harnesses already make, no data goes anywhere else.
@@ -283,6 +299,7 @@ There is one rule: **the harness you are talking to is the root controller of th
 
 ## Documentation
 
+- [docs/controller-identity.md](docs/controller-identity.md): controller identity, credentials and token files, the 6/1/13 tool split and administrator override audit, client-declared `via`, the store migration, and the upgrade/rollback with the two-direction smoke test
 - [docs/reference/dsh-bridge-reference.zh.md](docs/reference/dsh-bridge-reference.zh.md): the host bridge in depth (Chinese; the 1.2/1.3-era technical reference)
 - [docs/event-wake.md](docs/event-wake.md): event wake (durable outbox → controller)
 - [docs/long-supervisor.md](docs/long-supervisor.md): the long-task supervisor (edition 1)

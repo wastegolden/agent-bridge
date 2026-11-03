@@ -97,6 +97,63 @@ question; actual tool availability remains unknown.
 | `bridge_workspace_refresh` | Rebase a finished workspace onto an exact target head | Invalidates the old review; conflicts are preserved for the controller |
 | `bridge_workspace_integrate` | Move a verified head into a target | Refuses dirty trees, head drift and failed reviews |
 
+## Controller identity, ownership and override
+
+The host splits every tool into exactly one category: **6 read** (`bridge_check`,
+`bridge_result`, `bridge_dossier`, `bridge_list`, `bridge_models`,
+`bridge_capabilities`), **1 submit** (`bridge_submit`) and **13 mutate**
+(`bridge_approve`, `bridge_clarify`, `bridge_followup`, `bridge_cancel`,
+`bridge_pause`, `bridge_resume`, `bridge_reconcile`, `bridge_acknowledge`,
+`bridge_archive`, `bridge_cleanup`, `bridge_workspace_review`,
+`bridge_workspace_refresh`, `bridge_workspace_integrate`). Each tool's input schema is
+`additionalProperties:false`; only mutate tools add a top-level `override` object whose
+only key is `reason` (required, string, `maxLength: 500`, must contain non-whitespace).
+
+Ownership is the **authenticated controller principal** (`task.submittedBy`), derived
+from the bearer credential and immutable. `metadata.controller` and `parentTaskId` are
+audit/coordination hints only — they never grant authority.
+
+| Caller and target | Result |
+|---|---|
+| any principal, any read tool or `bridge_submit` | allowed; submit binds `submittedBy`; no `override` accepted |
+| owner on a mutate tool | allowed |
+| non-owner on a mutate tool, no override | `TASK_NOT_OWNED` |
+| administrator, foreign or historical (`submittedBy:null`) task, no override | `OVERRIDE_REASON_REQUIRED` |
+| administrator, foreign/historical task, `override:{reason}` | allowed after audit, then the existing lifecycle/revision/attempt/workspace/retention gates |
+| administrator, own task, `override:{reason}` | allowed, and still audited as an override |
+| non-administrator with override, or any override on read/submit | `OVERRIDE_NOT_PERMITTED` |
+| malformed override (non-object, extra key, non-string, over 500 characters) | `INVALID_ARGUMENTS` |
+| target does not exist | `TASK_NOT_FOUND` |
+
+The reason is measured before trimming (≤500 characters) and stored trimmed. The audit
+writes `task/override` **before** the business call — with `operationId`, `actor`,
+`submittedBy`, `tool`, `reason`, `revision`, `attemptId` and this call's `via` — then a
+linked `task/override-result` with `outcome:"returned"|"threw"`, the post-call
+`attemptId`, applicable `accepted`/`merged`/`archived`/`cleaned`/`eligible`/`replay`
+booleans and any returned/thrown `code`. Failure to persist the intent is
+`OVERRIDE_AUDIT_FAILED` and the business call never runs; failure to persist the result
+is `OVERRIDE_AUDIT_INCOMPLETE` and you must inspect the task and events before
+retrying. `returned` means only that the call returned. An interrupted call can leave
+an unclosed intent, whose outcome is unknown until read back. For `bridge_followup`
+and `bridge_clarify` there is no added asynchronous boundary between the intent and
+the synchronous service entry.
+
+Historical tasks have `submittedBy:null` and require a remaining administrator plus an
+override reason. `bridge_list` takes `submittedBy`: omitted = all, a controller ID =
+that principal (a retired ID still works for reading), `null` = historical. Read tools
+have no ownership check. `bridge_capabilities.controllerIdentity` reports
+`{enabled, schemaVersion:1, self, admin, controllers, ownership:"credential-principal",
+delegation:"inherit-root-credential", legacyTaskOwner:null,
+override:{requiredForForeignTasks:true,reasonMaxChars:500},
+via:{source:"client-declared",authorizes:false}}`; `self`/`admin` come from the current
+request, and no token or token path is returned.
+
+`via` is client-declared submission provenance from `X-Agent-Bridge-Chain` /
+`X-Agent-Bridge-Root-Task`. A root controller sends neither header (`via:null`); only a
+delegate sends them. It grants no authority and is not part of the idempotency hash.
+Invalid via headers return HTTP 400 `{error:"invalid via",code:"VIA_INVALID",details:
+{field,expected}}`; authentication still runs first (unknown token = 401).
+
 ## Bounded waits
 
 - Prefer `bridge_check` with an explicit wait ceiling over holding a call open;
@@ -110,6 +167,11 @@ question; actual tool availability remains unknown.
 
 - Reuse the idempotency key only for the same logical attempt; a new revision or a
   new objective needs a new key.
+- De-duplication is namespaced by `(ownerId, submittedBy, idempotencyKey)`: two
+  controllers may use the same key independently, while the same principal + key +
+  different packet is `IDEMPOTENCY_CONFLICT`. `via` is excluded from the hash, so a
+  changed chain does not create a second task. A delegate's key lives in the root
+  principal's namespace.
 - Track task id, revision and attempt id together. A result belongs to an attempt;
   mixing attempts is how stale output gets integrated.
 - Treat unknown ids as unknown: report them. Do not adopt a session by guessing.

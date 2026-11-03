@@ -49,6 +49,61 @@ source root are explicit arguments.
 
 `--dry-run` reports the same actions without changing anything.
 
+## Identity upgrade (controller identity, `p0b-v1`)
+
+Controller identity replaces the old top-level `token` / `credentialFile` /
+`tokenEnv` authentication with per-controller credential files (`controllers`) and a
+one-way task-store migration to `user_version = 1`. The endpoint is shared by every
+controller, so this is a **whole-host maintenance action**, never a step inside a
+coding task. Full schema, validation limits, audit and credential details:
+[docs/controller-identity.md](../../../docs/controller-identity.md).
+
+1. **Drain the whole host.** Finish or cancel every controller's tasks, collect and
+   acknowledge results, and confirm a real true/0/0 stop. Do not restart with live
+   tasks: recovery marks ambiguous work unknown and never replays it.
+2. **Prepare.** Use a temporary upstream directory such as
+   `F:/temp/agent-bridge-upstream` for backups, rehearsal and disposable tasks — never
+   a git worktree. Use fake tokens in rehearsal; never read the machine's real
+   credential files into a test or log. The deployment tooling prepares one token file
+   per controller (creating missing files, validating and keeping existing ones) and
+   generates an **overlap** host config that includes the temporary `legacy`
+   administrator plus a **final** config that omits it; the deploy config's `identity`
+   block carries `credentialDirectory`, `migrationBackupDirectory` and an optional
+   `legacyTokenFile`. A dry run generates no token. Point each client at the overlap
+   config for the window.
+3. **Stop and back up** under the temporary directory: the installed package/manifest,
+   both host configs, `<dataDirectory>` (`tasks.sqlite` including WAL/SHM because the
+   events live there, and worktrees that matter), the client configs (Claude plugin,
+   Codex `.mcp.json`, agent-peer state) and the token files.
+4. **First restart (overlap).** Start with the overlap config. The store snapshots the
+   old database into `identityMigrationBackupDirectory` and migrates 0 → 1; a mount
+   failure (`STORE_BACKUP_FAILED` / `STORE_MIGRATION_FAILED`) means the host did not
+   start and the old config can still be restored. Verify
+   `bridge_capabilities.controllerIdentity` (`self`, `admin`, `controllers`) and that
+   historical tasks stay readable (`bridge_list` with `submittedBy:null`). During the
+   window `legacy` is an administrator for migration/repair only: every mutation of a
+   foreign or **historical** task uses an explicit `override:{reason}`, recorded in the
+   audit trail; do not use the legacy token for normal work.
+5. **Dual-direction disposable-task smoke.** Submit a cheap read-only task from each
+   root and check `submittedBy` (root `via:null`); run one disposable delegate in each
+   direction (Claude → Codex and Codex → Claude) and confirm the delegate's tasks
+   belong to the root principal with client-declared `via`; confirm the Claude
+   delegate's strict MCP surface (only the plugin's two entries) and a cheap bridge
+   call; confirm a non-admin delegate cannot mutate the other root's task and that an
+   admin credential is refused for delegation before spawn; then archive/clean or
+   discard the disposable tasks deliberately.
+6. **Second restart (final).** Remove the `legacy` entry and its token file; start with
+   the final config (a v1 store is not migrated again). Verify the old legacy token now
+   returns HTTP 401 `{"error":"unauthorized"}`, the remaining clients authenticate,
+   and historical tasks are still readable (mutating them now needs a remaining
+   administrator plus an override reason).
+7. **Rollback is only a pre-work option.** The pre-migration snapshot plus the old
+   package/config/clients can be restored **before any real new work exists**.
+   Restoring it after new tasks/events/clients exist discards that work and leaves
+   clients inconsistent with the identity; real tasks then require **forward repair**
+   under the new schema, not a data rollback. Keep the snapshot until the upgrade is
+   accepted and real work has resumed.
+
 ## Boundaries
 
 - No global configuration is touched: not `~/.codex`, not `~/.agents`, not agent

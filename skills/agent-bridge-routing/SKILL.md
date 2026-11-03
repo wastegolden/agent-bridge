@@ -19,6 +19,17 @@ The harness the user is talking to is the **root controller** of that task. It a
 owns requirements, interface contracts, authorization, acceptance, integration and the
 final report to the user. Everything it hands out comes back as a result it must verify.
 
+Ownership is **server-enforced from the bearer credential** (`credential-principal`),
+not from packet metadata. `task.submittedBy` is the authenticated controller ID and is
+immutable; `metadata.controller` and `parentTaskId` are only audit/coordination hints
+and never grant authority. Act only on tasks bound to your controller ID; an
+administrator acting on a foreign or historical task must supply `override:{reason}`,
+and that operation is audited. A **delegate inherits the root controller's credential**,
+so the DSH tasks it submits belong to the root principal — final acceptance remains
+the root controller's responsibility. Sessions sharing one controller ID share that
+controller's permissions, and a delegate may modify other tasks belonging to the same
+root principal: these are accepted limitations of the cooperating-agent threat model.
+
 The chain of harnesses below the root travels with every peer call
 (`AGENT_BRIDGE_CHAIN`, e.g. `claude-code>codex`) and is enforced by the peer server, not
 by prompts:
@@ -158,9 +169,14 @@ session at all (`--no-session-persistence`), so they cannot be resumed.
   approve`), so the sub-controller can run DSH tasks and consult further — but never call a
   harness on its chain. Other MCP servers need approval and are refused in headless runs.
 - **Claude Code, consult/review:** only read-only built-ins exist (`--tools`), write tools are
-  denied, no MCP servers. **Claude Code, delegate:** `acceptEdits` plus the configured
-  `delegateAllowedTools`. A headless `claude -p` needs its own login (`claude` → `/login`);
-  until then calls fail with "Not logged in" and are reported as failed jobs.
+  denied, no MCP servers. **Claude Code, delegate:** `acceptEdits`, the configured
+  `delegateAllowedTools`, and `--strict-mcp-config` with exactly the plugin's two MCP
+  entries (`dsh_project` and `agent_peer`). The user's other MCP servers are deliberately
+  excluded from the delegate session — an explicit behaviour change from 1.7.0, so after
+  an upgrade smoke-test one delegate in each direction (Claude → Codex and Codex →
+  Claude) and confirm the two plugin servers work and the others are absent. A headless
+  `claude -p` needs its own login (`claude` → `/login`); until then calls fail with
+  "Not logged in" and are reported as failed jobs.
 - The chain survives a harness that filters MCP environments: the peer server records every
   child in a lineage ledger and the callee's server recovers its chain from it. This guards
   against accidental loss, not against a hostile sub-controller with shell access.

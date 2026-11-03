@@ -27,10 +27,18 @@ planning, mechanical integration and authoritative acceptance; local implementat
 is a fallback when DSH is unavailable or the project reserves the work for the
 controller.
 
-Several controllers may share one DSH host. Tag every packet with
-`metadata.controller` (`"codex"` or `"claude-code"`) and use a project-specific
-`projectId`; act (approve, acknowledge, archive, clean up) only on tasks you
-submitted.
+Several controllers may share one DSH host. Ownership is **server-enforced from the
+bearer credential** (`credential-principal`): `task.submittedBy` is the authenticated
+controller ID and is immutable. `metadata.controller` (`"codex"` or `"claude-code"`)
+and `parentTaskId` are only audit/coordination hints and never grant authority. Use a
+project-specific `projectId`; act (approve, clarify, follow up, acknowledge, archive,
+clean up) only on tasks bound to your controller ID. An administrator may act on a
+foreign or historical task only with an explicit `override:{reason}`, which is durable
+audited; override still goes through every existing lifecycle, revision, attempt,
+workspace and retention gate. A **delegate inherits the root controller's credential**,
+so its DSH tasks belong to the root principal; final acceptance remains the root
+controller's responsibility. Sessions that share one controller ID share that
+controller's permissions (accepted limitation of the cooperating-agent threat model).
 
 ## Tool surface
 
@@ -41,7 +49,10 @@ Probe before you plan — the host is authoritative:
 - `bridge_models` — provider/model/effort catalog used for routing decisions.
 
 Run work with `bridge_submit`, `bridge_check`, `bridge_result`, `bridge_approve`,
-`bridge_clarify`, `bridge_cancel`, `bridge_reconcile` and `bridge_list`. Collect with
+`bridge_clarify`, `bridge_followup`, `bridge_cancel`, `bridge_reconcile` and
+`bridge_list`. Mutations require a task bound to your controller (or an audited
+administrator override); the 6 read / 1 submit / 13 mutate split and its error codes are
+in [references/runtime-tools.md](references/runtime-tools.md). Collect with
 `bridge_acknowledge`, hide a settled session in the UI with `bridge_archive`, and
 reclaim owned workspaces with `bridge_cleanup`. Isolate and review with
 `bridge_workspace_review`, `bridge_workspace_refresh` and `bridge_workspace_integrate`.
