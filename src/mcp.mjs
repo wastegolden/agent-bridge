@@ -13,16 +13,26 @@ const object = properties => ({type:'object',properties,additionalProperties:fal
 export const BRIDGE_VERSION='1.5.0';
 const str={type:'string'};const num={type:'integer'};const bool={type:'boolean'};
 const taskArgs={taskId:str};
-// Lifecycle tool shapes. Both are deliberately narrow: a clarification carries
-// bounded text only, and archiving carries only the exact owned revision. Neither
-// can add materials, scope, model or a new task, and additionalProperties:false
-// rejects any such extra field.
+// Lifecycle tool shapes. They are deliberately narrow: a clarification or follow-up
+// carries bounded text plus its round CAS only, and archiving carries only the exact
+// owned revision. None can add materials, scope, model or a new task, and
+// additionalProperties:false rejects any such extra field.
 const clarifyArgs=object({
  taskId:{type:'string',minLength:1,pattern:'\\S',description:'Owned task identifier whose current understanding attempt is being clarified. The clarification runs in that existing session and never starts a second one.'},
  revision:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER,description:'Exact current positive task revision the clarification applies to. A mismatch is a clarification conflict, never an implicit rebase.'},
  understandingHash:{type:'string',minLength:1,pattern:'\\S',description:'Exact nonblank hash of the understanding currently awaiting approval. A stale hash is rejected even when the new text repeats earlier wording, because understanding is versioned.'},
  clarificationId:{type:'string',minLength:1,pattern:'\\S',maxLength:200,description:'Nonblank caller-chosen identifier of at most 200 characters. Replaying the same identifier with identical content returns the same task without another attempt; the same identifier with different content is a conflict.'},
  text:{type:'string',minLength:1,pattern:'\\S',maxLength:20000,description:'Nonblank clarification text of at most 20000 characters. It is versioned and appended to the next understanding attempt as clearly delimited untrusted context; the original packet, scope, acceptance, model and workspace remain authoritative and unchanged, and nothing executes until the new understanding is approved.'},
+});
+// A follow-up carries bounded text plus the exact round CAS only. It can never add a
+// packet, model, scope, material or budget: additionalProperties:false rejects any
+// such extra field before the service sees it.
+const followupArgs=object({
+ taskId:{type:'string',minLength:1,pattern:'\\S',description:'Owned task identifier whose settled attempt is being followed up. The question runs in that existing session and never starts a second one.'},
+ revision:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER,description:'Exact current positive task revision. A mismatch is a follow-up conflict, never an implicit rebase.'},
+ afterAttemptId:{type:'string',minLength:1,pattern:'\\S',description:'Exact current attempt identifier this follow-up replaces. It is the round compare-and-swap: a late follow-up bound to an older attempt is refused.'},
+ followupId:{type:'string',minLength:1,pattern:'\\S',maxLength:200,description:'Nonblank caller-chosen identifier of at most 200 characters. An identical replay returns the original attempt without another turn; the same identifier with different content is a conflict.'},
+ text:{type:'string',minLength:1,pattern:'\\S',maxLength:20000,description:'Nonblank follow-up question of at most 20000 characters. It is rendered as fence-delimited untrusted material in the existing session; the original packet, scope, model, workspace and permissions remain authoritative and unchanged.'},
 });
 const archiveArgs=object({
  taskId:{type:'string',minLength:1,pattern:'\\S',description:'Owned task identifier to UI-hide. Archiving preserves the workspace, results, evidence and events for their full retention window; no session persistence, worktree or job is deleted.'},
@@ -31,10 +41,11 @@ const archiveArgs=object({
 export const TOOLS=[
  ['bridge_submit','Submit one bounded task. Defaults to Flash; returns durable task identity quickly. The complete packet shape is advertised in inputSchema.properties.packet.',object({packet:TASK_PACKET_SCHEMA}),['packet']],
  ['bridge_check','Read task state and cursor-based events; bounded wait does not cancel work.',object({...taskArgs,after:num,waitMs:num,limit:num}),['taskId']],
- ['bridge_result','Read complete result in repeatable slices with evidence and uncertainty.',object({...taskArgs,offset:num,limit:num}),['taskId']],
+ ['bridge_result','Read complete result in repeatable slices with evidence and uncertainty. Omit attemptId for the current round or pass a round attemptId from a follow-up/dossier to read that earlier answer.',object({...taskArgs,offset:num,limit:num,attemptId:str}),['taskId']],
  ['bridge_dossier','Read-only closeout dossier for one owned task: the submitted request, effective route, workspace and review/integration evidence, acknowledgement and archive state. Large check output is truncated; read the full result with bridge_result.',object({...taskArgs}),['taskId']],
  ['bridge_approve','Controller authorizes execution after checking understanding against existing user authorization.',object({...taskArgs,revision:num,understandingHash:str}),['taskId','revision','understandingHash']],
  ['bridge_clarify','Clarify the understanding of one owned task in its existing session; only a task currently awaiting_approval is eligible, and any other state is rejected as a clarification conflict. Bounded versioned text is appended to the next understanding attempt as clearly delimited untrusted context; the original packet, scope, acceptance, model, workspace and revision stay unchanged. A clarification is never execution approval, the new understanding hash must still be approved, and an identical replay returns the same task without another attempt.',clarifyArgs,['taskId','revision','understandingHash','clarificationId','text']],
+ ['bridge_followup','Ask one bounded follow-up question in the existing owned session of a settled read-only (investigate or review) task. Eligible only for a completed, failed or cancelled task with a host-confirmed stop, zero active jobs and children, and a persisted session receipt; project tasks, project workers and unapproved understanding-gated tasks are refused. The same session, packet, scope, model and permissions are reused and never widened. An identical followupId with identical content replays the original attempt without another turn; the same identifier with different content is a conflict. Read each round with bridge_result by attemptId.',followupArgs,['taskId','revision','afterAttemptId','followupId','text']],
  ['bridge_cancel','Cancel owned queued work, active turn and jobs; inspect stop confirmation.',object({...taskArgs,reason:str}),['taskId']],
  ['bridge_pause','Pause one recurrent supervisor project (host pause AND packet.project.maxRounds >= 2). The request is persisted before the call returns, no new worker or supervisor round is admitted, and owned work finishes naturally; the project becomes paused only once the current round and every owned worker prove their stop. Idempotent by requestId and never a cancellation.',object({...taskArgs,requestId:str,reason:str}),['taskId','requestId']],
  ['bridge_resume','Resume one paused recurrent supervisor project after re-checking real stop, ownership and dispatch evidence plus the immutable deadline and cumulative budget. An unproven, expired or exhausted checkpoint is refused with a typed code and retained; the same task record continues with no copy, budget reset or deadline extension. Idempotent by requestId.',object({...taskArgs,requestId:str,reason:str}),['taskId','requestId']],
@@ -50,7 +61,7 @@ export const TOOLS=[
  ['bridge_workspace_integrate','Integrate a reviewed exact commit; refuses dirty or stale targets. checks run on source and merged target; optional baselineChecks run before merge. Both use the discoverable checks shape advertised in inputSchema.properties.checks.',object({...taskArgs,targetRepository:str,contractVersion:str,checks:CHECKS_SCHEMA,baselineChecks:CHECKS_SCHEMA}),['taskId','targetRepository','contractVersion']],
 ].map(([name,description,inputSchema,required])=>({name,description,inputSchema:{...inputSchema,required}}));
 
-// The generic type pass checks declared types only. The two lifecycle tools also
+// The generic type pass checks declared types only. The lifecycle tools also
 // enforce the fixed bounded, nonblank constraints here so malformed input is
 // rejected before any replay lookup, compare-and-swap or archive bookkeeping.
 const boundedText=(a,key,max)=>{
@@ -81,6 +92,12 @@ export function createDispatcher(service){
     // unknown option keys, so it must never be repeated inside the options object.
     return service.clarify(a.taskId,{revision:a.revision,understandingHash:a.understandingHash,clarificationId:a.clarificationId,text:a.text});
    }
+   case 'bridge_followup':{
+    ownedRevision(a);boundedText(a,'afterAttemptId');boundedText(a,'followupId',200);boundedText(a,'text',20000);
+    // Same identity/options split as bridge_clarify: taskId is the service identity
+    // argument, and only the four bounded option fields are forwarded verbatim.
+    return service.followup(a.taskId,{revision:a.revision,afterAttemptId:a.afterAttemptId,followupId:a.followupId,text:a.text});
+   }
    case 'bridge_cancel':return service.cancel(a.taskId,a.reason);
    case 'bridge_pause':return service.pause(a.taskId,{requestId:a.requestId,reason:a.reason});
    case 'bridge_resume':return service.resume(a.taskId,{requestId:a.requestId,reason:a.reason});
@@ -90,8 +107,16 @@ export function createDispatcher(service){
    case 'bridge_models':return {models:await service.adapter.models()};
    case 'bridge_capabilities':{
     const caps=await service.adapter.capabilities();
-    const adapterSupervisor=caps!==null&&typeof caps==='object'&&caps.supervisor!==null&&typeof caps.supervisor==='object'?caps.supervisor:null;
-    return {version:BRIDGE_VERSION,...caps,maxConcurrent:service.maxConcurrent,
+    const capsObject=caps!==null&&typeof caps==='object'&&!Array.isArray(caps)?caps:{};
+    const adapterSupervisor=capsObject.supervisor!==null&&typeof capsObject.supervisor==='object'?capsObject.supervisor:null;
+    // The adapter's own lifecycle report is authoritative when the follow-up seam
+    // exists; a missing seam is reported honestly as unsupported instead of assumed.
+    const lifecycleFollowup=typeof service.adapter.followup==='function'
+      ?null
+      :{supported:false,reason:'adapter has no followup method'};
+    return {version:BRIDGE_VERSION,...caps,
+     ...(lifecycleFollowup?{lifecycle:{...(capsObject.lifecycle!==null&&typeof capsObject.lifecycle==='object'&&!Array.isArray(capsObject.lifecycle)?capsObject.lifecycle:{}),followup:lifecycleFollowup}}:{}),
+     maxConcurrent:service.maxConcurrent,
      // `children` stays the live child INVENTORY array; the adapter's authoritative
      // child/job/reply SUPPORT statuses are preserved verbatim under `capabilities`
      // (the spread above would otherwise be overwritten by the inventory shape).

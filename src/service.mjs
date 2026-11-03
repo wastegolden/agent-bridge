@@ -2,13 +2,15 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { validatePacket, clone, digest, fail, TERMINAL, isWithin } from './contracts.mjs';
 import { resolveModel } from './models.mjs';
-import { buildPrompt, buildExecutionPrompt } from './context.mjs';
-import { clarificationRequestHash } from './store.mjs';
+import { buildPrompt, buildExecutionPrompt, buildFollowupPrompt } from './context.mjs';
+import { clarificationRequestHash, followupRequestHash } from './store.mjs';
 import { recoverCommandJobs } from './command-jobs.mjs';
 import { PROJECT_WAITING, PROJECT_PAUSING, PROJECT_PAUSED, buildProjectPrompt, buildRoundPrompt, createProjectRecord, projectDeadlineRemaining, resolveProjectGrant } from './long-task.mjs';
 
 const ACTIVE = new Set(['starting','running','cancelling',PROJECT_WAITING,PROJECT_PAUSING,PROJECT_PAUSED]);
 const LEGACY_PREFLIGHT = Object.freeze({supported:false,reason:'adapter-preflight-unavailable'});
+// bridge_followup carries exactly these bounded fields and nothing else.
+const FOLLOWUP_OPTION_KEYS = new Set(['revision','afterAttemptId','followupId','text']);
 const sleep = ms => new Promise(resolve=>setTimeout(resolve,ms));
 
 // Clarification text is untrusted context. It is carried as an extra inline material
@@ -131,8 +133,13 @@ export class BridgeService {
     return this.view(this.store.get(submitted.task.id));
   }
   view(task) {
-    const {packet,effectivePacket,result,prompt,callbackBinding,children,...summary}=task;
-    return {...summary,title:packet.title,projectId:packet.projectId,role:packet.role,contractVersion:packet.contractVersion,cwd:task.effectivePacket?.cwd??packet.cwd,resultAvailable:!!result?.text,dependencies:packet.dependencies,
+    const {packet,effectivePacket,result,prompt,callbackBinding,children,followups,...summary}=task;
+    // Follow-up snapshots may carry complete replaced results. The list/check view
+    // exposes only the compact round index; the full history stays behind
+    // bridge_result(attemptId) and bridge_dossier.
+    const history=Array.isArray(followups)?followups:[];
+    return {...summary,round:history.length,title:packet.title,projectId:packet.projectId,role:packet.role,contractVersion:packet.contractVersion,cwd:task.effectivePacket?.cwd??packet.cwd,resultAvailable:!!result?.text,dependencies:packet.dependencies,
+      followups:history.map(entry=>({round:entry?.round??null,followupId:entry?.followupId??null,afterAttemptId:entry?.afterAttemptId??null,attemptId:entry?.attemptId??null,createdAt:entry?.createdAt??null})),
       activeChildren:(Number.isInteger(task.activeChildren)&&task.activeChildren>=0)?task.activeChildren:null,
       children:(Array.isArray(children)?children:[]).map(c=>({childId:c.childId,state:c.state,attemptId:c.attemptId,sessionId:c.sessionId??null})),
       callback:callbackBinding?{grantId:callbackBinding.grantId,targetId:callbackBinding.targetId,boundAt:callbackBinding.boundAt??null}:null};
@@ -199,12 +206,19 @@ export class BridgeService {
     // The derived packet exists only to build task.prompt with validated clarification
     // context. task.effectivePacket and the packet handed to the adapter stay immutable.
     const promptPacket=derivedPacket(effective,task);
+    // A follow-up continues the SAME session with only the fenced question; the
+    // original scope/materials/skills are already in that session and are not re-sent.
     // A long-task project round gets the supervisor planning prompt; a recurrent
     // continuation round gets the REAL-results review prompt; every other task
     // keeps its exact historical prompt path.
-    const prompt=effective.project!==undefined
-      ?(task.continuationKind==='supervisor-round'?buildRoundPrompt(effective,task):buildProjectPrompt(effective,task.effectiveModel,task.project?.grant??{workerScope:effective.project.workerScope,maxWorkers:8,maxConcurrentWorkers:3,maxRepairAttempts:2,maxWorkerStarts:24,maxTotalToolCalls:10000,timeoutMs:3600000},task.id))
-      :task.executionApproved?buildExecutionPrompt(promptPacket,task.understanding):buildPrompt(promptPacket,{model:task.effectiveModel,skills:selectedSkills});
+    const followupEntry=task.continuationKind==='followup'
+      ?(Array.isArray(task.followups)?task.followups.find(entry=>entry&&entry.attemptId===task.attemptId):null)
+      :null;
+    const prompt=task.continuationKind==='followup'
+      ?(followupEntry?buildFollowupPrompt(effective,{taskId:id,round:followupEntry.round,followupId:followupEntry.followupId,text:followupEntry.text}):fail('FOLLOWUP_CONFLICT','The current follow-up attempt has no persisted question entry'))
+      :effective.project!==undefined
+        ?(task.continuationKind==='supervisor-round'?buildRoundPrompt(effective,task):buildProjectPrompt(effective,task.effectiveModel,task.project?.grant??{workerScope:effective.project.workerScope,maxWorkers:8,maxConcurrentWorkers:3,maxRepairAttempts:2,maxWorkerStarts:24,maxTotalToolCalls:10000,timeoutMs:3600000},task.id))
+        :task.executionApproved?buildExecutionPrompt(promptPacket,task.understanding):buildPrompt(promptPacket,{model:task.effectiveModel,skills:selectedSkills});
     task=this.store.update(id,{prompt,effectivePacket:effective,startedAt:Date.now()});
     const attemptId=task.attemptId;
     const callbacks={onEvent:e=>this.onEvent(id,attemptId,e),onResult:r=>this.finish(id,r,attemptId)};
@@ -223,6 +237,14 @@ export class BridgeService {
           error.code='CLARIFICATION_UNSUPPORTED';error.dispatched=false;throw error;
         }
         receipt=await this.adapter.reconsider(hostTask,callbacks);
+      }else if(task.continuationKind==='followup'){
+        // Follow-ups also reuse the existing owned session, in execution mode, with the
+        // original packet's permissions and model route. Never create or continue.
+        if(typeof this.adapter.followup!=='function'){
+          const error=new Error('This adapter cannot continue the existing owned session with a follow-up attempt');
+          error.code='FOLLOWUP_UNSUPPORTED';error.dispatched=false;throw error;
+        }
+        receipt=await this.adapter.followup(hostTask,callbacks);
       }else if(task.continuationKind==='supervisor-round'){
         // A bounded RECURRENT supervisor round reuses the SAME owned session through the
         // dedicated adapter seam: it re-proves terminal true/0/0, ownership and the
@@ -271,7 +293,15 @@ export class BridgeService {
       // baseline persisted before dispatch; every legacy path (baseline 0) keeps the
       // historical cumulative comparison byte-for-byte.
       const toolLimit=task.effectivePacket?.budget?.maxToolCalls??task.packet.budget.maxToolCalls;
-      const roundBaseline=task.continuationKind==='supervisor-round'&&task.project&&Number.isInteger(task.project.roundBaselineToolCalls)?task.project.roundBaselineToolCalls:0;
+      let roundBaseline=0;
+      if(task.continuationKind==='supervisor-round'&&task.project&&Number.isInteger(task.project.roundBaselineToolCalls))roundBaseline=task.project.roundBaselineToolCalls;
+      else if(task.continuationKind==='followup'){
+        // A follow-up gets the SAME per-round budget as the original packet: the
+        // cumulative store counter is measured against the baseline persisted when
+        // this attempt was minted, so a prior round's spend never eats this one.
+        const followupEntry=(Array.isArray(task.followups)?task.followups:[]).find(entry=>entry&&entry.attemptId===task.attemptId);
+        if(followupEntry&&Number.isInteger(followupEntry.baselineToolCalls))roundBaseline=followupEntry.baselineToolCalls;
+      }
       const spent=Math.max(0,stats.toolCalls-roundBaseline);
       if(spent>toolLimit&&task.status!=='cancelling')void this.cancel(id,'tool budget exceeded').catch(()=>{});
     }
@@ -427,6 +457,50 @@ export class BridgeService {
     this.kick();
     return this.get(id);
   }
+  /**
+   * Ask one bounded follow-up question in the EXISTING owned session of a settled
+   * read-only (investigate|review) task. Parameters are bounded and no other field is
+   * accepted, the idempotent replay lookup precedes every eligibility/capability check,
+   * the question is fence-validated BEFORE an attempt is minted, and the transactional
+   * store CAS does the real eligibility work. Returns the current task view plus a
+   * compact `followup` identity block (replay carries the ORIGINAL attempt id).
+   */
+  followup(id,options={}){
+    if(options===null||typeof options!=='object'||Array.isArray(options))fail('INVALID_ARGUMENTS','Expected follow-up options');
+    for(const key of Object.keys(options))if(!FOLLOWUP_OPTION_KEYS.has(key))fail('INVALID_ARGUMENTS',`Unexpected ${key}`,{field:key});
+    const {revision,afterAttemptId,followupId,text}=options;
+    if(typeof id!=='string'||!id.trim())fail('INVALID_ARGUMENTS','taskId must be a nonblank string',{field:'taskId',expected:'nonblank string'});
+    if(!Number.isSafeInteger(revision)||revision<1)fail('INVALID_ARGUMENTS','revision must be a positive safe integer',{field:'revision',expected:'positive safe integer'});
+    if(typeof afterAttemptId!=='string'||!afterAttemptId.trim())fail('INVALID_ARGUMENTS','afterAttemptId must be a nonblank string',{field:'afterAttemptId',expected:'nonblank string'});
+    if(typeof followupId!=='string'||!followupId.trim()||followupId.length>200)fail('INVALID_ARGUMENTS','followupId must be a nonblank string of at most 200 characters',{field:'followupId',expected:'nonblank string of at most 200 characters'});
+    if(typeof text!=='string'||!text.trim()||text.length>20000)fail('INVALID_ARGUMENTS','text must be a nonblank string of at most 20000 characters',{field:'text',expected:'nonblank string of at most 20000 characters'});
+    const current=this.store.get(id);
+    const requestHash=followupRequestHash({revision,afterAttemptId,followupId,text});
+    // Replay lookup precedes every eligibility and capability check: an identical replay
+    // still returns the ORIGINAL attempt after the task advanced or was archived, and it
+    // must never dispatch again.
+    const existing=(Array.isArray(current.followups)?current.followups:[]).find(entry=>entry&&entry.followupId===followupId);
+    if(existing){
+      if(existing.requestHash!==requestHash)fail('FOLLOWUP_IDEMPOTENCY_CONFLICT','followupId already binds different follow-up content');
+      return {...this.get(id),followup:{followupId,afterAttemptId:existing.afterAttemptId,attemptId:existing.attemptId,round:existing.round,replay:true}};
+    }
+    // Capability support is decided by method existence only; capabilities() must not be awaited here.
+    if(typeof this.adapter.followup!=='function')fail('FOLLOWUP_UNSUPPORTED','This adapter cannot continue the existing owned session with a follow-up attempt');
+    if(this.cleaning.has(id))fail('CLEANUP_BUSY','Archive or cleanup is already running for this task');
+    if(this.running.get(id)?.dispatchPending===true)fail('SESSION_NOT_READY','A follow-up cannot start while a dispatch receipt is still pending');
+    // Fence validation happens BEFORE the transaction mints an attempt: a question that
+    // would break out of its evidence fence leaves the task completely untouched.
+    const effective=current.effectivePacket??clone(current.packet);
+    buildFollowupPrompt(effective,{taskId:id,round:(Array.isArray(current.followups)?current.followups.length:0)+1,followupId,text});
+    const outcome=this.store.followup(id,{followupId,text,revision,afterAttemptId});
+    if(!outcome.created){
+      const entry=outcome.entry;
+      return {...this.get(id),followup:{followupId:entry.followupId,afterAttemptId:entry.afterAttemptId,attemptId:entry.attemptId,round:entry.round,replay:true}};
+    }
+    this.kick();
+    const entry=outcome.task.followups[outcome.task.followups.length-1];
+    return {...this.get(id),followup:{followupId:entry.followupId,afterAttemptId:entry.afterAttemptId,attemptId:entry.attemptId,round:entry.round,replay:false}};
+  }
   approve(id,{revision,understandingHash}){
     const task=this.store.get(id);
     if(task.status!=='awaiting_approval'||revision!==task.revision||understandingHash!==task.understandingHash)fail('APPROVAL_CONFLICT','Approval must match the awaiting task revision and understanding');
@@ -568,9 +642,30 @@ export class BridgeService {
     const deadline=Date.now()+waitMs;
     while(true){const task=this.store.get(id);const events=this.store.events(id,{after,limit});if(events.length||!ACTIVE.has(task.status)&&task.status!=='queued'||Date.now()>=deadline)return {task:this.view(task),events,cursor:events.at(-1)?.seq??after};await sleep(Math.min(100,deadline-Date.now()));}
   }
-  result(id,{offset=0,limit=20000}={}){
+  result(id,{offset=0,limit=20000,attemptId}={}){
     if(!Number.isSafeInteger(offset)||offset<0||!Number.isInteger(limit)||limit<1||limit>100000)fail('INVALID_CURSOR','Invalid result slice');
-    const t=this.store.get(id);const text=t.result.text;return {taskId:id,revision:t.revision,attemptId:t.attemptId,status:t.status,text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,evidence:t.result.evidence,checks:t.result.checks,uncertainties:t.result.uncertainties};
+    if(attemptId!==undefined&&(typeof attemptId!=='string'||!attemptId.trim()))fail('INVALID_ARGUMENTS','attemptId must be a nonblank string',{field:'attemptId',expected:'nonblank string'});
+    const t=this.store.get(id);
+    const history=Array.isArray(t.followups)?t.followups:[];
+    // Omitted (or explicitly current) attemptId = the current round. An attemptId that
+    // matches a follow-up entry's replaced-attempt snapshot reads THAT round's stored
+    // result; anything else is ATTEMPT_NOT_FOUND. `round` is 0 for the original task,
+    // and `followupId` names the follow-up that produced the selected round (null for
+    // the original task).
+    let selected=t;
+    let round=history.length;
+    let followupId=history.length?history[history.length-1]?.followupId??null:null;
+    if(attemptId!==undefined&&attemptId!==t.attemptId){
+      const index=history.findIndex(entry=>entry&&entry.previousAttempt&&entry.previousAttempt.attemptId===attemptId);
+      if(index<0)fail('ATTEMPT_NOT_FOUND','No recorded round matches that attemptId');
+      const entry=history[index];
+      selected=entry.previousAttempt;
+      round=Number.isSafeInteger(entry.round)?entry.round-1:index;
+      followupId=index===0?null:history[index-1]?.followupId??null;
+    }
+    const stored=selected.result&&typeof selected.result==='object'?selected.result:{};
+    const text=typeof stored.text==='string'?stored.text:'';
+    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:t.status,text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:stored.evidence,checks:stored.checks,uncertainties:stored.uncertainties};
   }
   /**
    * Read-only closeout dossier for one owned task. It reads the persisted record and
@@ -588,6 +683,34 @@ export class BridgeService {
     const rootTask=packet.metadata?.rootTask;
     const storedResult=task.result&&typeof task.result==='object'?task.result:null;
     const resultText=typeof storedResult?.text==='string'?storedResult.text:null;
+    // Every round in ascending order, the CURRENT round last. A past round's own
+    // outcome is the next follow-up's `previousAttempt` snapshot (the record that
+    // replaced it); only the last round still lives on the task itself. Questions are
+    // truncated to their first 4000 characters and result bodies are reduced to a
+    // length, so the dossier never becomes a second full history.
+    const history=Array.isArray(task.followups)?task.followups:[];
+    const summarizeRound=(own,followupId,question,round)=>({
+      round,
+      attemptId:typeof own?.attemptId==='string'?own.attemptId:null,
+      followupId,
+      question:typeof question==='string'?(question.length>4000?question.slice(0,4000):question):null,
+      status:typeof own?.status==='string'?own.status:null,
+      stopConfirmed:own?.stopConfirmed===true,
+      resultChars:typeof own?.result?.text==='string'?own.result.text.length:null,
+      resultCollected:own?.resultCollected===true,
+      accepted:own?.accepted===true,
+      endedAt:Number.isFinite(own?.endedAt)?own.endedAt:null
+    });
+    const rounds=[];
+    if(history.length===0)rounds.push(summarizeRound(task,null,null,0));
+    else{
+      rounds.push(summarizeRound(history[0]?.previousAttempt,null,null,0));
+      for(let index=0;index<history.length;index+=1){
+        const entry=history[index];
+        const own=index+1<history.length?history[index+1]?.previousAttempt:task;
+        rounds.push(summarizeRound(own,typeof entry?.followupId==='string'?entry.followupId:null,entry?.text,Number.isSafeInteger(entry?.round)?entry.round:index+1));
+      }
+    }
     return {
       schemaVersion:1,
       taskId:task.id,
@@ -599,6 +722,8 @@ export class BridgeService {
       phase:task.phase??null,
       revision:Number.isSafeInteger(task.revision)?task.revision:null,
       attempt:Number.isSafeInteger(task.attempt)?task.attempt:null,
+      attemptId:typeof task.attemptId==='string'?task.attemptId:null,
+      rounds,
       createdAt:Number.isFinite(task.createdAt)?task.createdAt:null,
       updatedAt:Number.isFinite(task.updatedAt)?task.updatedAt:null,
       controller:typeof controller==='string'?controller:null,

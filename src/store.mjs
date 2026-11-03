@@ -2,11 +2,22 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { digest, clone, fail } from './contracts.mjs';
+import { digest, clone, fail, TERMINAL } from './contracts.mjs';
 
 // Clarification request hashes bind every call input except the taskId, which is
 // already implicit in the task record the transaction reads.
 export const clarificationRequestHash = ({revision,understandingHash,clarificationId,text}) => digest({revision,understandingHash,clarificationId,text});
+// Follow-up request hashes bind every caller input except the taskId. The text is
+// bound EXACTLY (never trimmed) so identical replays replay and edited content conflicts.
+export const followupRequestHash = ({revision,afterAttemptId,followupId,text}) => digest({revision,afterAttemptId,followupId,text});
+
+const FOLLOWUP_ROLES = new Set(['investigate','review']);
+// The adapter re-derives a recovered cancellation from the SAME host settlement
+// evidence the previous attempt recorded, so the binding keeps only that evidence.
+function followupSettlementEvidence(result) {
+  const evidence = Array.isArray(result?.evidence) ? result.evidence : [];
+  return clone(evidence.filter(entry => entry !== null && typeof entry === 'object' && !Array.isArray(entry) && entry.source === 'dsh-host' && entry.kind === 'attempt-settlement'));
+}
 
 export class TaskStore {
   constructor({directory,ownerId}) {
@@ -165,6 +176,116 @@ export class TaskStore {
       };
       this.db.prepare('UPDATE tasks SET body=? WHERE id=? AND owner=?').run(JSON.stringify(next),id,this.ownerId);
       this.event(id,{type:'task/clarified',revision:task.revision,attemptId,clarificationId,generation});
+      return {created:true,task:clone(next)};
+    });
+  }
+  // Transactional compare-and-swap for bridge_followup. Replay lookup happens BEFORE
+  // eligibility so an identical replay still succeeds after the task advanced or was
+  // archived. The immutable packet, revision, requestHash, sessionId, workspace,
+  // effectiveModel, executionApproved, artifactState and pinned flag are preserved;
+  // only the attempt and the follow-up history advance. Eligibility order is the
+  // order of the published error table: role -> project/worker -> understanding gate
+  // -> revision/afterAttemptId -> terminal -> archived -> true/0/0 -> dispatch/session
+  // -> bound session. The persisted entry keeps the replaced round's complete snapshot
+  // and the exact owned-session binding needed to recover a follow-up after a host
+  // restart (and to retry after a dispatched:false refusal).
+  followup(id,{followupId,text,revision,afterAttemptId}={}) {
+    const requestHash=followupRequestHash({revision,afterAttemptId,followupId,text});
+    return this.transaction(()=>{
+      const task=this.get(id);
+      const history=Array.isArray(task.followups)?task.followups:[];
+      const existing=history.find(entry=>entry&&entry.followupId===followupId);
+      if(existing){
+        if(existing.requestHash!==requestHash)fail('FOLLOWUP_IDEMPOTENCY_CONFLICT','followupId already binds different follow-up content');
+        return {created:false,task:clone(task),entry:clone(existing)};
+      }
+      const packet=task.packet&&typeof task.packet==='object'?task.packet:{};
+      if(!FOLLOWUP_ROLES.has(packet.role))fail('FOLLOWUP_ROLE_FORBIDDEN','Follow-ups are available only to investigate and review tasks');
+      if(packet.project!==undefined||task.project!==undefined)fail('FOLLOWUP_UNSUPPORTED_TASK','A long-task project cannot continue with a follow-up');
+      if(packet.metadata&&typeof packet.metadata==='object'&&packet.metadata.supervisorProject!==undefined&&packet.metadata.supervisorProject!==null)fail('FOLLOWUP_UNSUPPORTED_TASK','A project worker cannot continue with a follow-up');
+      if(packet.understandingRequired===true&&task.executionApproved!==true)fail('FOLLOWUP_UNSUPPORTED_TASK','A task whose understanding gate was never approved cannot continue with a follow-up');
+      if(task.revision!==revision)fail('FOLLOWUP_CONFLICT','Follow-up must match the owned task revision');
+      if(task.attemptId!==afterAttemptId)fail('FOLLOWUP_CONFLICT','Follow-up must bind the exact current attempt; the task already advanced past the attempt this request names');
+      if(!TERMINAL.has(task.status))fail('FOLLOWUP_CONFLICT','A follow-up requires a completed, failed or cancelled task');
+      if((task.sessionArchivedAt!==undefined&&task.sessionArchivedAt!==null)||(task.archivedAt!==undefined&&task.archivedAt!==null))fail('FOLLOWUP_ARCHIVED','An archived or cleaned task cannot continue with a follow-up');
+      if(task.stopConfirmed!==true)fail('SESSION_NOT_READY','A follow-up requires a host-confirmed stop of the previous attempt');
+      if(!Number.isInteger(task.activeJobs)||task.activeJobs!==0)fail('SESSION_NOT_READY',`A follow-up requires zero active jobs (${Number.isInteger(task.activeJobs)?task.activeJobs:'unknown'})`);
+      if(!Number.isInteger(task.activeChildren)||task.activeChildren!==0)fail('SESSION_NOT_READY',`A follow-up requires zero active child sessions (${Number.isInteger(task.activeChildren)?task.activeChildren:'unknown'})`);
+      if(task.dispatchPending===true)fail('SESSION_NOT_READY','A follow-up cannot start while a dispatch receipt is still pending');
+      if(typeof task.sessionId!=='string'||!task.sessionId.trim())fail('SESSION_NOT_READY','A follow-up requires the persisted session of the previous attempt');
+      let boundAttempt;
+      if(typeof task.requestId==='string'&&task.requestId.trim()&&Number.isFinite(task.dispatchReceiptAt)){
+        boundAttempt={
+          attemptId:task.attemptId,
+          requestId:task.requestId,
+          sessionId:task.sessionId,
+          revision:task.revision,
+          effectiveModel:clone(task.effectiveModel??null),
+          status:task.status,
+          stopConfirmed:task.stopConfirmed===true,
+          settlementEvidence:followupSettlementEvidence(task.result)
+        };
+      }else{
+        // N2: a follow-up attempt refused BEFORE dispatch (dispatched:false) has no
+        // receipt of its own. Its session binding is the one the refused round already
+        // recorded, and it stays reusable so one refusal never strands the session.
+        const refusal=task.dispatchFailure;
+        const prior=refusal&&refusal.dispatched===false&&refusal.attemptId===task.attemptId
+          ?history.find(entry=>entry&&entry.attemptId===task.attemptId&&entry.boundAttempt)
+          :null;
+        if(!prior)fail('SESSION_NOT_READY','A follow-up requires a persisted receipt (or a prior bound follow-up attempt) for the session');
+        boundAttempt=clone(prior.boundAttempt);
+      }
+      const now=Date.now();
+      const attemptId=randomUUID();
+      const round=history.length+1;
+      const entry={
+        followupId,requestHash,text,revision,afterAttemptId,
+        attemptId,round,createdAt:now,
+        baselineToolCalls:Number.isInteger(task.stats?.toolCalls)?task.stats.toolCalls:0,
+        previousAttempt:{
+          attemptId:task.attemptId,
+          attempt:task.attempt,
+          revision:task.revision,
+          sessionId:task.sessionId??null,
+          requestId:task.requestId??null,
+          phase:task.phase??null,
+          status:task.status??null,
+          continuationKind:task.continuationKind??null,
+          dispatchReceiptAt:task.dispatchReceiptAt??null,
+          startedAt:task.startedAt??null,
+          endedAt:task.endedAt??null,
+          effectiveModel:clone(task.effectiveModel??null),
+          stopConfirmed:task.stopConfirmed===true,
+          activeJobs:Number.isInteger(task.activeJobs)?task.activeJobs:null,
+          activeChildren:Number.isInteger(task.activeChildren)?task.activeChildren:null,
+          result:clone(task.result??null),
+          error:clone(task.error??null),
+          stats:clone(task.stats??null),
+          resultCollected:task.resultCollected===true,
+          accepted:task.accepted===true,
+          dispatchFailure:clone(task.dispatchFailure??null)
+        },
+        boundAttempt
+      };
+      const next={
+        ...task,
+        followups:[...history,entry],
+        attemptId,
+        attempt:task.attempt+1,
+        attemptHistory:[...(task.attemptHistory??[]),{attemptId:task.attemptId,phase:task.phase,status:task.status,sessionId:task.sessionId,requestId:task.requestId}],
+        continuationKind:'followup',
+        status:'queued',phase:'queued',
+        dispatchStarted:false,dispatchPending:false,dispatchReceiptAt:null,requestId:null,
+        startedAt:null,endedAt:null,
+        result:{text:'',evidence:[],checks:[],uncertainties:[]},
+        error:null,dispatchFailure:null,cancellationRequested:null,cancelError:null,cancelRemaining:null,recovery:null,
+        resultCollected:false,accepted:false,
+        stopConfirmed:true,activeJobs:0,activeChildren:0,
+        updatedAt:now
+      };
+      this.db.prepare('UPDATE tasks SET body=? WHERE id=? AND owner=?').run(JSON.stringify(next),id,this.ownerId);
+      this.event(id,{type:'task/followup-requested',revision:task.revision,afterAttemptId,attemptId,followupId,round});
       return {created:true,task:clone(next)};
     });
   }
