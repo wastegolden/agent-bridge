@@ -665,7 +665,7 @@ export class BridgeService {
     }
     const stored=selected.result&&typeof selected.result==='object'?selected.result:{};
     const text=typeof stored.text==='string'?stored.text:'';
-    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:selected===t?t.status:(selected.status??null),text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:stored.evidence,checks:stored.checks,uncertainties:stored.uncertainties};
+    return {taskId:id,revision:t.revision,attemptId:attemptId??t.attemptId,status:selected===t?t.status:(selected.status??null),text:text.slice(offset,offset+limit),offset,nextOffset:Math.min(text.length,offset+limit),totalChars:text.length,hasMore:offset+limit<text.length,round,followupId,evidence:Array.isArray(stored.evidence)?stored.evidence:[],checks:Array.isArray(stored.checks)?stored.checks:[],uncertainties:Array.isArray(stored.uncertainties)?stored.uncertainties:[]};
   }
   /**
    * Read-only closeout dossier for one owned task. It reads the persisted record and
@@ -694,6 +694,7 @@ export class BridgeService {
       attemptId:typeof own?.attemptId==='string'?own.attemptId:null,
       followupId,
       question:typeof question==='string'?(question.length>4000?question.slice(0,4000):question):null,
+      questionChars:typeof question==='string'?question.length:null,
       status:typeof own?.status==='string'?own.status:null,
       stopConfirmed:own?.stopConfirmed===true,
       resultChars:typeof own?.result?.text==='string'?own.result.text.length:null,

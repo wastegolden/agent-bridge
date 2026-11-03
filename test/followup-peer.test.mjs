@@ -681,3 +681,19 @@ test('sweeper acts once on a session named by two due records', async () => {
     assert.equal(index.get('r-second').sessions.get('dsh\u0000sess-shared').state, 'skipped');
   });
 });
+
+test('renderRecord labels round 0 as the original request and marks a truncated question', () => {
+  const rounds = [
+    { round: 0, attemptId: 'attempt-1', followupId: null, question: null, questionChars: null, status: 'completed', resultText: 'ANSWER ONE' },
+    { round: 1, attemptId: 'attempt-2', followupId: 'follow-1', question: 'Q'.repeat(4000), questionChars: 4500, status: 'completed', resultText: 'ANSWER TWO' },
+    { round: 2, attemptId: 'attempt-3', followupId: 'follow-2', question: 'Short?', questionChars: 6, status: 'completed', resultText: 'ANSWER THREE' },
+  ];
+  const record = renderRecord(renderInput([renderedBridgeTask({ rounds, resultText: 'ANSWER THREE' })]));
+  const roundZero = record.slice(record.indexOf('##### 第 0 轮'), record.indexOf('##### 第 1 轮'));
+  assert.ok(roundZero.includes('（原始任务，见上方请求）'), 'round 0 points at the original request instead of "none"');
+  assert.equal(roundZero.includes('（无）\n\n回答'), false);
+  const roundOne = record.slice(record.indexOf('##### 第 1 轮'), record.indexOf('##### 第 2 轮'));
+  assert.ok(roundOne.includes('（问题共 4500 字符，这里只保留了前 4000 字符）'));
+  const roundTwo = record.slice(record.indexOf('##### 第 2 轮'));
+  assert.equal(roundTwo.includes('这里只保留了前'), false, 'a complete question carries no truncation note');
+});

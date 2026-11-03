@@ -293,6 +293,7 @@ export async function closeoutRootTask({
           attemptId: source.attemptId,
           followupId: typeof source.followupId === 'string' && source.followupId !== '' ? source.followupId : null,
           question: typeof source.question === 'string' ? source.question : null,
+          questionChars: Number.isInteger(source.questionChars) ? source.questionChars : null,
           status: typeof source.status === 'string' ? source.status : null,
           resultText: typeof roundText === 'string' ? roundText : null,
         });

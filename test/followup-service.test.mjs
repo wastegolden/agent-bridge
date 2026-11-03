@@ -757,3 +757,61 @@ test('buildFollowupPrompt rejects reserved evidence markers and malformed argume
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a follow-up cancelled before dispatch never strands the session; an ambiguous dispatch stays refused', async () => {
+  const f = fixture();
+  try {
+    const id = await f.settled('fu-cancel-before-dispatch');
+    const first = f.store.get(id);
+    const out = f.service.followup(id, { revision: 1, afterAttemptId: first.attemptId, followupId: 'cbd-1', text: 'First question?' });
+    // The drain runs in a microtask; this cancel lands while the follow-up is still queued.
+    await f.service.cancel(id, 'controller changed its mind');
+    const cancelled = f.store.get(id);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.attemptId, out.followup.attemptId);
+    assert.notEqual(cancelled.dispatchStarted, true, 'the cancelled follow-up never crossed the host boundary');
+    assert.equal(f.followupCalls.length, 0);
+
+    const retry = f.service.followup(id, { revision: 1, afterAttemptId: cancelled.attemptId, followupId: 'cbd-2', text: 'Second question?' });
+    await until(() => f.followupCalls.length === 1, 'retry dispatched');
+    const entries = f.store.get(id).followups;
+    assert.deepEqual(entries[1].boundAttempt, entries[0].boundAttempt, 'the never-dispatched attempt carries the original binding');
+    assert.equal(entries[1].boundAttempt.attemptId, first.attemptId);
+    assert.equal(f.followupCalls[0].sessionId, first.sessionId);
+    assert.equal(retry.followup.round, 2);
+    await until(() => f.service.get(id).status === 'running', 'retry running');
+    f.done(id, 'second answer');
+    await until(() => f.service.get(id).status === 'completed', 'retry completed');
+
+    // A dispatch that STARTED but has no receipt is ambiguous: it must stay refused.
+    const settledTask = f.store.get(id);
+    f.store.update(id, { status: 'failed', phase: 'failed', dispatchStarted: true, requestId: null, dispatchReceiptAt: null, dispatchFailure: null, stopConfirmed: true, activeJobs: 0, activeChildren: 0 });
+    assert.throws(
+      () => f.service.followup(id, { revision: 1, afterAttemptId: settledTask.attemptId, followupId: 'cbd-3', text: 'Third?' }),
+      (error) => error.code === 'SESSION_NOT_READY',
+    );
+    assert.equal(f.store.get(id).followups.length, 2, 'nothing was minted for the ambiguous attempt');
+  } finally { f.close(); }
+});
+
+test('historical rounds always return evidence arrays and the dossier reports the full question length', async () => {
+  const f = fixture();
+  try {
+    const id = await f.settled('fu-history-shape');
+    const first = f.store.get(id);
+    // A predecessor stored without evidence arrays still reads back as arrays.
+    f.store.update(id, { result: { text: 'first answer' } });
+    const longQuestion = 'Q'.repeat(4500);
+    f.service.followup(id, { revision: 1, afterAttemptId: first.attemptId, followupId: 'hist-1', text: longQuestion });
+    await until(() => f.service.get(id).status === 'running', 'follow-up running');
+    f.done(id, 'second answer');
+    await until(() => f.service.get(id).status === 'completed', 'follow-up completed');
+    const old = f.service.result(id, { attemptId: first.attemptId });
+    assert.equal(old.text, 'first answer');
+    assert.deepEqual([old.evidence, old.checks, old.uncertainties], [[], [], []]);
+    const rounds = f.service.dossier(id).rounds;
+    assert.equal(rounds[0].questionChars, null);
+    assert.equal(rounds[1].question.length, 4000);
+    assert.equal(rounds[1].questionChars, 4500);
+  } finally { f.close(); }
+});

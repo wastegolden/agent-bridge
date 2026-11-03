@@ -31,6 +31,8 @@ export const DEFAULT_DISPUTED_RETAIN_DAYS = 30;
 export const DEFAULT_RECORD_DIR = '.agent-bridge/records';
 export const INDEX_FILE = 'records-index.jsonl';
 export const RECORD_MISSING = '（无）';
+/** Shown as round 0's question in a multi-round record: the original request above. */
+const RECORD_ORIGINAL_REQUEST = '（原始任务，见上方请求）';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_SLUG_CHARS = 40;
@@ -372,13 +374,20 @@ function renderBridgeRounds(rounds) {
     const meta = [`attemptId=${oneLine(round.attemptId)}`];
     if (text(round.followupId) !== '') meta.push(`followupId=${oneLine(round.followupId)}`);
     meta.push(`状态=${oneLine(round.status)}`);
+    const hasQuestion = typeof round.question === 'string';
+    // Round 0 is the original task: its "question" is the request recorded above.
+    const question = hasQuestion ? fenceSafe(round.question) : roundNumber === 0 ? RECORD_ORIGINAL_REQUEST : RECORD_MISSING;
+    // The dossier keeps only a bounded prefix of a long question; say so instead of
+    // presenting the prefix as the whole question.
+    const truncated = hasQuestion && Number.isInteger(round.questionChars) && round.questionChars > round.question.length;
     lines.push(
       '',
       `##### 第 ${roundNumber} 轮（${meta.join(' · ')}）`,
       '',
       '问题:',
       '',
-      round.question === null || round.question === undefined ? RECORD_MISSING : fenceSafe(round.question),
+      question,
+      ...(truncated ? ['', `（问题共 ${round.questionChars} 字符，这里只保留了前 ${round.question.length} 字符）`] : []),
       '',
       '回答:',
       '',

@@ -1448,6 +1448,20 @@ test('service and adapter agree end to end: follow-up in the same session, histo
     assert.equal(after.status, 'running', `post-restart follow-up dispatched (error: ${after.error?.message ?? 'none'})`)
     assert.equal(after.sessionId, first.sessionId)
     assert.equal(host.calls.create.length, 1)
+
+    // Same process, after the recovered dispatch: settle round two, then ask round three.
+    // The recovered record must accept another follow-up without a second restart.
+    await settle(service, submitted.id, 'round two answer', 3)
+    const third = store.get(submitted.id)
+    service.followup(submitted.id, { revision: 1, afterAttemptId: third.attemptId, followupId: 'e2e-f3', text: 'One more?' })
+    await until(() => ['running', 'failed', 'unknown'].includes(store.get(submitted.id).status), 'third follow-up dispatch')
+    const thirdRunning = store.get(submitted.id)
+    assert.equal(thirdRunning.status, 'running', `third follow-up dispatched (error: ${thirdRunning.error?.message ?? 'none'})`)
+    await settle(service, submitted.id, 'round three answer', 4)
+    assert.deepEqual(service.dossier(submitted.id).rounds.map((r) => r.round), [0, 1, 2, 3])
+    assert.equal(service.result(submitted.id, { attemptId: third.attemptId }).text, 'round two answer')
+    assert.equal(service.result(submitted.id).text, 'round three answer')
+    assert.equal(host.calls.create.length, 1)
   } finally {
     service.close()
     store.close()
