@@ -905,7 +905,7 @@ test('followup refuses a cleaned or archived task and requires a nonempty contro
     const started = await adapter.start(makeEnvelope({ id: 'task-fu-archived', attemptId: 'attempt-prev-1' }))
     claim(host, started.sessionId, started.requestId, 1)
     host.emitTurnEnd(started.sessionId, 1, { kind: 'completed' })
-    const archived = await adapter.archive(makeEnvelope({ id: 'task-fu-archived' }))
+    const archived = await adapter.archive({ ...makeEnvelope({ id: 'task-fu-archived' }), ownerId: 'owner-1', origin: 'codex-bridge' })
     assert.equal(archived.archived, true)
     await assert.rejects(adapter.followup(followupEnvelope({ id: 'task-fu-archived', attemptId: 'attempt-followup-2' }), {}), (error) => {
       assert.equal(error.code, 'adapter/task-archived')
