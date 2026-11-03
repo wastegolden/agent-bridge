@@ -1,10 +1,10 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { TaskStore } from './store.mjs';
 import { BridgeService } from './service.mjs';
 import { DshAdapter } from './dsh-adapter.mjs';
 import { WorkspaceManager } from './workspaces.mjs';
 import { createMcpHandler } from './mcp.mjs';
+import { loadControllerRegistry, isAbsoluteLocalPath } from './controller-auth.mjs';
 import { fail } from './contracts.mjs';
 import { defaultPolicy } from './defaults.mjs';
 import { acquireHostLease } from './host-lease.mjs';
@@ -17,8 +17,9 @@ import { SupervisorProjectRuntime, normalizeProjectConfig } from './long-task.mj
 export async function mountBridge(ctx,config={}){
  const root=config.dataDirectory??(process.env.DSH_HOME?path.join(process.env.DSH_HOME,'codex-bridge-v1'):null);
  if(!root||!path.isAbsolute(root))fail('CONFIG_REQUIRED','Absolute dataDirectory or DSH_HOME required');
- const token=config.credentialFile?fs.readFileSync(config.credentialFile,'utf8').trim():process.env[config.tokenEnv??'DSH_MCP_TOKEN'];
- if(!token)fail('AUTH_UNAVAILABLE','Configured credential source unavailable');
+ if(['token','credentialFile','tokenEnv'].some(key=>Object.hasOwn(config,key)))fail('CONTROLLER_CONFIG_INVALID','Legacy authentication configuration must be migrated',{field:'controllers',expected:'controller credentials without token, credentialFile or tokenEnv'});
+ const registry=loadControllerRegistry(config.controllers);
+ if(config.identityMigrationBackupDirectory!==undefined&&!isAbsoluteLocalPath(config.identityMigrationBackupDirectory))fail('CONTROLLER_CONFIG_INVALID','Invalid migration backup directory',{field:'identityMigrationBackupDirectory',expected:'absolute local directory path'});
  const ownerId=config.ownerId??'codex-bridge-v1';
  const endpoint=config.endpoint??'/mcp/codex-bridge-v1';
  if(!/^\/mcp\/[a-z0-9-]+$/.test(endpoint))fail('INVALID_ENDPOINT','Invalid MCP mount path');
@@ -45,7 +46,7 @@ export async function mountBridge(ctx,config={}){
  const release=acquireHostLease(root);
  let store,adapter,service,unmount,projects;
  try{
- store=new TaskStore({directory:root,ownerId});
+ store=new TaskStore({directory:root,ownerId,migrationBackupDirectory:config.identityMigrationBackupDirectory});
  // ONE authoritative reservation ledger per bridge owner is shared by the
  // service drain and every supervisor in this process: roots and children
  // consume the same configured limit (no changed default) and unknown work
@@ -82,7 +83,7 @@ export async function mountBridge(ctx,config={}){
  // The controller need not poll the same process, so the producer status is exposed
  // for capability reporting without claiming a live runner or a proven transport.
  service.eventWake=producerStatus;
- const handler=createMcpHandler(service,{token,allowedHosts:config.allowedHosts??['127.0.0.1','localhost']});
+ const handler=createMcpHandler(service,{registry,allowedHosts:config.allowedHosts??['127.0.0.1','localhost']});
  unmount=ctx.webServer.register({kind:'exact',path:endpoint,handler:(req,res)=>{void handler(req,res);}});
  await service.recover();
  // Shutdown order matters: stop accepting new project transitions first, then close the

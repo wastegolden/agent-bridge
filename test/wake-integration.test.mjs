@@ -728,8 +728,8 @@ test('the real wake client reports a wrong-target acknowledgement as unknown, ne
 test('mountBridge preserves an injected notification sink when eventWake is off', async (t) => {
   const root = await tempRoot(t);
   const credentialFile = path.join(root, 'token.txt');
-  // The mount refuses a bearer credential shorter than 24 characters
-  // (AUTH_UNAVAILABLE, src/mcp.mjs), so this fixture supplies a synthetic
+  // The controller registry requires a bearer credential of at least 24 characters,
+  // so this fixture supplies a synthetic
   // sufficiently long value. It is never a real credential and is never read from
   // the environment; the only assertion about it is that the mount succeeded.
   await writeFile(credentialFile, 'synthetic-test-credential-not-a-real-secret-0001\n', 'utf8');
@@ -746,7 +746,7 @@ test('mountBridge preserves an injected notification sink when eventWake is off'
   };
   const bridge = await mountBridge(ctx, {
     dataDirectory: path.join(root, 'bridge'),
-    credentialFile,
+    controllers: [{ id: 'codex', tokenFile: credentialFile }],
     notificationSink: injected,
     maxConcurrent: 16,
   });
