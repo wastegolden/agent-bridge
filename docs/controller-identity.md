@@ -54,6 +54,12 @@ before normal operation resumes.
 }
 ```
 
+Deployment tooling emits `controllers` and `identityMigrationBackupDirectory` as an
+identity **fragment**: merge that fragment into the existing complete host config
+(keeping `dataDirectory`, `ownerId`, retention, wake and the other host fields). The
+overlap and final configurations used during the upgrade are each complete host configs,
+not fragments.
+
 The example paths are placeholders. Create token files outside the repository, for
 example under `F:/temp/agent-bridge-upstream/...`; never commit them and never paste a
 real token into documentation, a packet or a log.
@@ -399,11 +405,25 @@ CREATE TABLE tasks(
 New empty store (version 0, no schema objects): create the version-1 `tasks`/`events`
 schema directly — no backup and no copy step.
 
-Existing version-0 store (either the old `tasks` shape or an already-version-1 shape is
-checked against the schema it shipped):
+Schema acceptance is exact and version-specific:
 
-1. Determine the version and the exact schema; an unknown version or a shape mismatch
-   is `STORE_SCHEMA_UNSUPPORTED` (never guessed or repaired).
+- `user_version = 0` must be the **shipped v0** schema:
+  `tasks(id,owner,idem,hash,body,UNIQUE(owner,idem))` — no `submittedBy` column — plus
+  the shipped `events` table and `task_events` index. A database that reports
+  `user_version = 0` but already carries the v1 `tasks` shape is
+  `STORE_SCHEMA_UNSUPPORTED`; it is **not** treated as a v0 store and is **not**
+  migrated.
+- `user_version = 1` must be the **shipped v1** schema above (`submittedBy` present,
+  `UNIQUE(owner,submittedBy,idem)`) plus the same events objects. An unknown version, a
+  missing or extra object, or any column, uniqueness or SQL-text mismatch is
+  `STORE_SCHEMA_UNSUPPORTED`.
+- Version-0 bodies must not contain `submittedBy` or `via`; version-1 bodies are
+  validated as described after the migration steps.
+
+Existing version-0 store:
+
+1. Determine the version and the exact schema; a mismatch is
+   `STORE_SCHEMA_UNSUPPORTED` (never guessed or repaired).
 2. Require `identityMigrationBackupDirectory`; create it and take a
    `VACUUM INTO <backup>/tasks-v0-<timestamp>-<uuid>.sqlite` snapshot, which includes
    committed WAL content. Run `PRAGMA integrity_check` on the snapshot and `fsync` it
@@ -422,7 +442,8 @@ checked against the schema it shipped):
 
 An already-version-1 store is opened without migrating. Version-1 bodies are validated
 on open: `via` must be present, `submittedBy` must be `null` or match the controller ID
-pattern, and `row.submittedBy` must equal `body.submittedBy ?? ""`.
+pattern, and `row.submittedBy` must equal `body.submittedBy ?? ""`. Historical v0 bodies
+never contain `submittedBy`/`via`; the migration adds them as `null`.
 
 ### Legacy ownership after migration
 
@@ -513,23 +534,39 @@ lineage ledger; the job's `bridge` object carries only `state` and `reason`.
 
 ### Claude Code delegate: strict MCP configuration (explicit behaviour change)
 
-A Claude Code **delegate** is started with `--strict-mcp-config --mcp-config <json>`
-where the JSON contains **exactly the plugin's two MCP entries**:
+Only a **Claude Code delegate** — the target harness is Claude Code, which includes
+Codex → Claude — is started with `--strict-mcp-config --mcp-config <json>`, where the
+JSON contains **exactly the plugin's two MCP entries**:
 
-- `plugin_agent-bridge_dsh_project` → `bin/bridge.mjs` (the stdio carrier, so inherited
-  credentials, disabled markers and via work in both directions);
+- `plugin_agent-bridge_dsh_project` → `bin/bridge.mjs` (the stdio carrier, so the child
+  receives inherited credentials, disabled markers and via regardless of which harness
+  is the delegate);
 - `plugin_agent-bridge_agent_peer` → `bin/peer-mcp.mjs` with
   `AGENT_BRIDGE_SELF=claude-code`.
 
 `--strict-mcp-config` means the user's **other** MCP servers are deliberately excluded
-from the delegate's session. This is an intentional behaviour change relative to
-1.7.0, where a delegate could inherit the user's MCP configuration. It narrows what a
-sub-controller can reach through MCP; it does not widen anything.
+from that Claude Code delegate's session. This is an intentional behaviour change
+relative to 1.7.0, where a delegate could inherit the user's MCP configuration. It
+narrows what a sub-controller can reach through MCP; it does not widen anything.
 
-Because this changes a live client's tool surface, an upgrade requires a **root smoke
-test**: after restart, start one delegate in each direction (Claude → Codex and
-Codex → Claude), confirm the delegate sees the two plugin MCP servers and can complete
-one cheap bridge call, and confirm the other user MCP servers are absent as intended.
+This restriction is **direction-specific and does not apply to a Codex delegate**. When
+Claude delegates to Codex (Claude → Codex), the child is Codex: it keeps the Codex MCP
+configuration with the forwarded credential/chain environment, and no two-entry
+`--strict-mcp-config` exclusion is claimed for it. A Claude → Codex smoke test verifies
+the inherited root identity and carrier (the task belongs to the root principal and its
+delegate `via` is recorded); it must not assert that Codex excludes the user's other MCP
+servers.
+
+Because the Claude Code narrowing changes a live client's tool surface, an upgrade
+requires a **dual-direction root smoke test**: after restart, run one disposable
+delegate in each direction (Claude → Codex and Codex → Claude) and verify:
+
+- Codex → Claude: the Claude Code delegate sees exactly the two plugin MCP entries, the
+  user's other MCP servers are absent, and one cheap bridge call succeeds;
+- Claude → Codex: the Codex delegate inherits the root's non-administrator identity and
+  `via` carrier and can submit one cheap DSH task; other Codex MCP servers are not
+  asserted absent.
+
 Do this with disposable tasks before relying on the new configuration for real work.
 
 Codex read-only runs already disable configured plugins (`readOnlyDisablePlugins`) and
@@ -562,14 +599,24 @@ document.
    controller (create if missing, validate and keep existing ones), the
    `controllers` list, `identityMigrationBackupDirectory`, and both an **overlap** host
    configuration (includes the temporary `legacy` administrator) and a **final**
-   configuration (without `legacy`). The deployment tooling generates both host
-   configs and clients; the deploy config's `identity` block carries
-   `credentialDirectory`, `migrationBackupDirectory` and an optional `legacyTokenFile`.
-   A dry run must generate no token.
-4. Refresh the client side: Claude Code uses its own controller token for the
-   `dsh_project` HTTP entry; Codex's root session clears the shared environment token
-   and uses its own credential file; the operator command uses its own file. Point each
-   client at the overlap configuration for the maintenance window.
+   configuration (without `legacy`). The deploy config's `identity` block carries
+   `credentialDirectory`, `migrationBackupDirectory` and an optional `legacyTokenFile`,
+   and its output is an **identity fragment** (`controllers` +
+   `identityMigrationBackupDirectory`) to **merge into the complete host config** that
+   keeps `dataDirectory`, `ownerId` and every other host field; the overlap and final
+   configs are each complete. A dry run must generate no token.
+4. Refresh the client side so each root uses its **own** controls, not a shared one:
+   - Claude Code uses its own controller token for the `dsh_project` HTTP entry, loaded
+     into the Claude **root launch environment** as `DSH_MCP_TOKEN`;
+   - Codex's root clears the shared environment token and uses its own credential file
+     through the stdio carrier, with its own `AGENT_PEER_CONFIG`;
+   - each root gets its **own separate** agent-peer config (for example
+     `config/agent-peer.claude-code.json` and `config/agent-peer.codex.json`). The two
+     configs share the same `stateDir`, but each `bridge.credentialFile` points at that
+     root's own token file. Replace the legacy single shared file: copy it once per root
+     and set each `bridge.credentialFile`;
+   - the operator command uses its own file.
+   Point each client at the overlap configuration for the maintenance window.
 
 ### 2. Stop and back up
 
@@ -579,17 +626,22 @@ document.
    - the host configuration (overlap and final);
    - `<dataDirectory>`, i.e. `tasks.sqlite` **and** its WAL/SHM state (the events live
      in the same database), plus worktrees that still matter;
-   - the client configurations (Claude plugin configuration, Codex `.mcp.json`,
-     agent-peer config/state) and the token files.
+   - the client configurations (Claude plugin configuration, Codex `.mcp.json`, each
+     root's agent-peer config and the shared state) and the token files. The **live
+     controller token files are not disposable**: keep them and their backup copies.
 3. Keep a restore copy and do not delete the old installation yet.
+4. Install the new package (the uninstall/install sequence in README §1) while the host
+   is stopped, **before the first restart**. The first restart must load the
+   identity-aware code that validates `controllers` and migrates the store; never start
+   the old package with the new configuration.
 
 ### 3. First restart (overlap)
 
-1. Start the host with the **overlap** configuration. The store migrates 0 → 1 and
-   writes the pre-migration snapshot into `identityMigrationBackupDirectory` first. If
-   the mount fails with `STORE_BACKUP_FAILED` or `STORE_MIGRATION_FAILED`, stop: the
-   host did not start, the backup is retained, and restoring the old configuration is
-   still safe.
+1. Start the host with the **overlap** configuration after the new package is
+   installed. The store migrates 0 → 1 and writes the pre-migration snapshot into
+   `identityMigrationBackupDirectory` first. If the mount fails with
+   `STORE_BACKUP_FAILED` or `STORE_MIGRATION_FAILED`, stop: the host did not start, the
+   backup is retained, and restoring the old configuration is still safe.
 2. Verify `bridge_capabilities`: `controllerIdentity.enabled === true`, the correct
    `self`/`admin` for each client, and the expected `controllers` list. Confirm
    historical tasks are still readable (`bridge_list` with `submittedBy: null`) and
@@ -604,8 +656,12 @@ document.
    - run one disposable delegate in each direction (Claude → Codex and Codex →
      Claude) and confirm the delegate's tasks belong to the root principal and that
      its `via` chain is recorded as client-declared provenance;
-   - confirm the Claude delegate's strict MCP surface (the two plugin entries only)
-     and that a cheap bridge call succeeds;
+   - Codex → Claude: confirm the Claude Code delegate's strict MCP surface (the two
+     plugin entries only, the user's other MCP servers absent) and that a cheap bridge
+     call succeeds;
+   - Claude → Codex: confirm the Codex delegate inherited the root identity/carrier and
+     can complete a cheap DSH submission; do not assert that Codex excludes the user's
+     other MCP servers;
    - confirm a normal (non-admin) delegate cannot mutate the other root's task
      (`TASK_NOT_OWNED`) and that an administrator delegate attempt is refused before
      spawn (`PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN`);
@@ -620,8 +676,10 @@ document.
 3. Verify the remaining controllers and clients still authenticate; historical tasks
    remain readable; mutating a historical task now requires a remaining administrator
    plus an override reason.
-4. Delete the temporary token files/backups only after the new identity is accepted
-   and real work has resumed.
+4. Keep the live controller token files and the pre-migration snapshot(s) you still
+   need for rollback and audit. Delete only intended disposable test artifacts and,
+   after the final restart, the temporary `legacy` token file; do not delete live
+   controller token files or the needed backup snapshots.
 
 ### Rollback
 

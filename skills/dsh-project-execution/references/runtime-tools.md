@@ -172,6 +172,11 @@ Invalid via headers return HTTP 400 `{error:"invalid via",code:"VIA_INVALID",det
   different packet is `IDEMPOTENCY_CONFLICT`. `via` is excluded from the hash, so a
   changed chain does not create a second task. A delegate's key lives in the root
   principal's namespace.
+- The store opens only the shipped schemas: `user_version=0` must have the shipped v0
+  `tasks` shape (no `submittedBy`, `UNIQUE(owner,idem)`), `user_version=1` the shipped
+  v1 shape; any version/shape mismatch is `STORE_SCHEMA_UNSUPPORTED` (never guessed or
+  repaired), while a new empty store with no schema objects is created directly at v1.
+  Version-0 bodies carry no `submittedBy`/`via`; migrated rows keep `submittedBy:null`.
 - Track task id, revision and attempt id together. A result belongs to an attempt;
   mixing attempts is how stale output gets integrated.
 - Treat unknown ids as unknown: report them. Do not adopt a session by guessing.

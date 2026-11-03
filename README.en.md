@@ -29,7 +29,7 @@ Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call
 | Part | Where | What it does |
 |---|---|---|
 | DSH host bridge | `dsh-host/index.cjs`, `src/*` | A DSH plugin that serves the MCP endpoint `/mcp/codex-bridge-v1` on the DSH host (default `http://127.0.0.1:3080`), authenticated with a bearer token |
-| `dsh_project` | MCP server in both plugin manifests | Connects to that endpoint over MCP HTTP with `Authorization: Bearer <DSH_MCP_TOKEN>` |
+| `dsh_project` | MCP server in both plugin manifests | The Claude root connects over MCP HTTP with `Authorization: Bearer <DSH_MCP_TOKEN>` from the Claude launch environment; the Codex template uses the stdio carrier `bin/bridge.mjs` to forward to the same endpoint |
 | `agent_peer` | `bin/peer-mcp.mjs`, `src/peer/*` | Runs the other harness through its headless CLI for consult / read-only review / sub-controller delegation, with a job ledger, chain rules and closeout records |
 | Skills | `skills/agent-bridge-routing`, `skills/dsh-project-execution` | Routing rules and the DSH execution discipline |
 
@@ -56,7 +56,7 @@ Each tool has exactly one category: read tools do not check ownership; `bridge_s
 
 ### dsh_project
 
-`dsh_project` is the MCP server on the Claude Code / Codex side. It talks to the host endpoint over MCP HTTP and takes the token from the `DSH_MCP_TOKEN` environment variable. The Claude Code manifest inlines this server; the Codex template is `.codex-mcp.json`. The stdio carrier `bin/bridge.mjs` is still available, but neither client needs it by default.
+`dsh_project` takes two different client paths. On the Claude Code side `.claude-plugin/plugin.json` inlines it as an MCP HTTP server that connects straight to the host endpoint, with the bearer token read from the Claude launch environment's `DSH_MCP_TOKEN` (each root uses its own token). The Codex template `.codex-mcp.json` is stdio: it runs `node ./bin/bridge.mjs`, the repository's forwarding carrier, which bridges MCP stdio to the same HTTP endpoint; the carrier inherits the token from the environment and, when there is none, uses `DSH_BRIDGE_CREDENTIAL_FILE` to read Codex's own token file. The Claude HTTP entry and the Codex stdio carrier are two different client paths, configured as described above.
 
 ### agent_peer
 
@@ -89,7 +89,7 @@ For compatibility with existing installs the persisted ids are still the old one
 - **Windows** (verified; other platforms have code paths but are untested).
 - **Claude Code and/or Codex**.
 - Peer calls need each headless CLI to be logged in once.
-- One bearer token file per root controller (host `controllers[].tokenFile`); Claude Code / Codex send **their own controller's** token through `DSH_MCP_TOKEN` — do not share one old token across controllers. Restart Claude / Codex after setting it.
+- One bearer token file per root controller (host `controllers[].tokenFile`). The Claude root puts **its own controller's** token in the launch environment's `DSH_MCP_TOKEN` (the HTTP entry uses it); the Codex root clears the shared environment token and reads its own file through `DSH_BRIDGE_CREDENTIAL_FILE` / the deployed credential environment (the stdio carrier uses it). Do not share one old token across controllers. Restart Claude / Codex after setting it.
 
 ## Install
 
@@ -113,7 +113,7 @@ Both scripts accept `--dry-run` (`--plan` is a synonym) to print the plan first.
 
 4. Start DSH.
 
-When upgrading from the shared `credentialFile` authentication to controller identity (`controllers`), do not simply start the host: follow the upgrade/rollback section of [docs/controller-identity.md](docs/controller-identity.md) — drain the whole host, stop, back up, and do the two restarts (overlap config, then the final config without `legacy`). The old top-level authentication keys are refused at mount.
+When upgrading from the shared `credentialFile` authentication to controller identity (`controllers`), do not simply start the host: install the new package first (section 1; the old package cannot read `controllers`), then follow the upgrade/rollback section of [docs/controller-identity.md](docs/controller-identity.md) — drain the whole host, stop, back up, and do the two restarts (overlap config, then the final config without `legacy`). Merge the generated identity fragment into the complete host config before starting. The old top-level authentication keys are refused at mount.
 
 Example host config (replace the paths; the full validation rules are in [docs/controller-identity.md](docs/controller-identity.md)):
 
@@ -142,8 +142,8 @@ Example host config (replace the paths; the full validation rules are in [docs/c
 
 - `ownerId` is a persisted identity: keep the value an existing install used, or old tasks cannot be claimed. The default is `codex-bridge-v1`.
 - `controllers` is a required array (1–32). Each controller has its own bearer token file; `id` matches `^[a-z][a-z0-9-]{0,63}$` and is unique, `tokenFile` is an absolute local path, and the trimmed file content must be 24–512 printable ASCII characters with no internal whitespace (a new token is 64 hex characters from `randomBytes(32)`). Duplicate or weak tokens refuse the mount; give `admin: true` only to the real `operator`. The configuration stores paths, never tokens.
-- `identityMigrationBackupDirectory`: required before migrating an existing (`user_version=0`) task store; the host takes a consistent snapshot first. The old top-level `token` / `credentialFile` / `tokenEnv` authentication fields are refused and must be migrated to `controllers`.
-- Clients still send the bearer token through `DSH_MCP_TOKEN`, but each root controller uses its own file. Deployment tooling creates missing token files and loads the matching client token; an existing file is validated and kept, never overwritten:
+- `identityMigrationBackupDirectory`: required before migrating an existing (`user_version=0`) task store, which must be the shipped v0 schema (`tasks(id,owner,idem,hash,body,UNIQUE(owner,idem))`, no `submittedBy`); the host takes a consistent snapshot first. `user_version=1` must match the shipped v1 schema (with `submittedBy` and `UNIQUE(owner,submittedBy,idem)`); a version/schema mismatch — for example `user_version=0` on the v1 table shape — is `STORE_SCHEMA_UNSUPPORTED`, never guessed or repaired. A new empty store (`user_version=0` with no schema objects) is created directly at v1. The old top-level `token` / `credentialFile` / `tokenEnv` authentication fields are refused and must be migrated to `controllers`.
+- Each client uses its own token file: the Claude root sends the bearer token from the launch environment's `DSH_MCP_TOKEN`; the Codex root points `DSH_BRIDGE_CREDENTIAL_FILE` at its own file and the stdio carrier reads it. Deployment tooling creates missing token files and loads the matching client token; an existing file is validated and kept, never overwritten:
 
   ```bash
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <private>/credentials/<controller-id>.token
@@ -164,7 +164,7 @@ claude plugin configure agent-bridge@agent-bridge
 The marketplace name and the plugin name both come from `.claude-plugin/marketplace.json` (`agent-bridge` / `agent-bridge`). Without flags, `configure` only shows the options and which are unset; to save values, pipe a JSON object into `--values-stdin` (options left out keep their values):
 
 ```bash
-echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<path>/agent-peer.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<path>/agent-peer.claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
 ```
 
 The three options:
@@ -181,7 +181,7 @@ Then **quit the Claude desktop app completely and reopen it**.
 
 Works for an extracted package without git history, and for a machine that is already hand-configured. Clone or download this repository, then:
 
-1. Copy `scripts/deploy.example.json` outside the repository and edit it. Three fields are required: `deployRoot` (holds `plugin/`, `config/`, `state/` and the Claude local marketplace below it), `nodePath` and `bridgeUrl`. Optional: `repo` (export the committed HEAD of this git repository; without it the package directory is copied as is), `gitExecutable`, `peerConfig`, `identity` (`credentialDirectory`, `migrationBackupDirectory`, optional `legacyTokenFile`; enabling identity refuses the old shared `credentialFile` configuration), `codexPluginDir`, `codexExecutable`, `codexPluginId`, `codexMarketplace`, `claudeExecutable`, `claudePluginId`. Executable paths may use whole `*` segments; the newest match is used, because both desktop apps install their CLI under version/hash directories that change on update.
+1. Copy `scripts/deploy.example.json` outside the repository and edit it. Three fields are required: `deployRoot` (holds `plugin/`, `config/`, `state/` and the Claude local marketplace below it), `nodePath` and `bridgeUrl`. Optional: `repo` (export the committed HEAD of this git repository; without it the package directory is copied as is), `gitExecutable`, `peerConfig`, `identity` (`credentialDirectory`, `migrationBackupDirectory`, optional `legacyTokenFile`; enabling identity refuses the old shared `credentialFile` configuration, and it emits the `controllers` + `identityMigrationBackupDirectory` fragment to merge into the complete host config plus one peer config per root), `codexPluginDir`, `codexExecutable`, `codexPluginId`, `codexMarketplace`, `claudeExecutable`, `claudePluginId`. Executable paths may use whole `*` segments; the newest match is used, because both desktop apps install their CLI under version/hash directories that change on update.
 2. Plan first, then run:
 
 ```bash
@@ -189,14 +189,14 @@ node scripts/deploy-local.mjs --config <your deploy.json> --dry-run
 node scripts/deploy-local.mjs --config <your deploy.json>
 ```
 
-It creates machine-specific files only when they are **missing** and never overwrites an existing one: the Claude local marketplace (`<deployRoot>/.claude-plugin/marketplace.json`), `config/agent-peer.json`, the Codex plugin's `.mcp.json` (`dsh_project` over HTTP with `DSH_MCP_TOKEN`, `agent_peer` with the absolute node path) and the Codex personal-marketplace entry. It writes machine paths into the deployed copy's plugin defaults, syncs the Codex plugin skills and manifest, and — when `claudeExecutable` is set — refreshes the Claude Code plugin cache.
+It creates machine-specific files only when they are **missing** and never overwrites an existing one: the Claude local marketplace (`<deployRoot>/.claude-plugin/marketplace.json`), one `config/agent-peer.<root>.json` per root (shared `stateDir`, each with its own `credentialFile`), the Codex plugin's `.mcp.json` (based on `.codex-mcp.json`: `dsh_project` through the stdio carrier with Codex's own credential environment, `agent_peer` with the absolute node path and Codex's own peer config) and the Codex personal-marketplace entry. It writes machine paths into the deployed copy's plugin defaults, syncs the Codex plugin skills and manifest, and — when `claudeExecutable` is set — refreshes the Claude Code plugin cache.
 
 3. **Quit and reopen the Claude desktop app**; start a new Codex session.
 
 ### 4. Codex by hand (when not using 3)
 
 1. Put this repository's `skills/`, `.codex-plugin/`, `.codex-mcp.json`, `bin/` and `src/` into the plugin directory `~/.agents/plugins/plugins/agent-bridge`. The shipped `.codex-plugin/plugin.json` points at `./.codex-mcp.json`; when installing as a machine plugin, change its `mcpServers` to `./.mcp.json` (that is what the deploy script does).
-2. Put a machine-specific `.mcp.json` in the plugin directory, based on `.codex-mcp.json`, with `agent_peer`'s `command` set to the absolute node path, its `args` pointing at the absolute `bin/peer-mcp.mjs` inside the plugin directory, and `AGENT_PEER_CONFIG` set to the absolute config path. The template's `default_tools_approval_mode: "approve"` is what makes MCP tool calls work under `codex exec`; do not drop it.
+2. Put a machine-specific `.mcp.json` in the plugin directory, based on `.codex-mcp.json`, with `agent_peer`'s `command` set to the absolute node path, its `args` pointing at the absolute `bin/peer-mcp.mjs` inside the plugin directory, and `AGENT_PEER_CONFIG` set to **Codex's own** peer config path. The template's `default_tools_approval_mode: "approve"` is what makes MCP tool calls work under `codex exec`; do not drop it.
 3. Add a marketplace entry to `~/.agents/plugins/marketplace.json`, with `path` relative to the user home.
 4. Install the plugin:
 
@@ -206,7 +206,7 @@ codex plugin add agent-bridge@personal
 
 ### 5. agent-peer config
 
-Claude Code and Codex should point at the **same** file so both see one job ledger and one chain ledger.
+Each root gets its **own separate** agent-peer config file: Claude's `peer_config` points at `config/agent-peer.claude-code.json` and Codex's `AGENT_PEER_CONFIG` at `config/agent-peer.codex.json`. Both files share one `stateDir` (so both roots see the same job and chain ledger), but each `bridge.credentialFile` points at that root's own controller token file (`credentials/claude-code.token` / `credentials/codex.token`). Never hand one file with a `credentialFile` to both roots: one root would read the other's credential. The template below uses `<root-controller-id>`; the deploy tooling generates one copy per root. If the machine still has the old single `config/agent-peer.json`, split it into two copies and set each `bridge.credentialFile` (the deploy tooling only fills missing files and never rewrites an existing one).
 
 ```json
 {
@@ -238,7 +238,7 @@ Claude Code and Codex should point at the **same** file so both see one job ledg
     "sweepIntervalMinutes": 60,
     "claudeProjectsDir": "C:/Users/<you>/.claude/projects"
   },
-  "bridge": { "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1" },
+  "bridge": { "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1", "credentialFile": "<private>/credentials/<root-controller-id>.token" },
   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3 }
 }
 ```
@@ -252,7 +252,7 @@ The main keys:
 - `peers.<target>.efforts`: optional, replaces the allowed reasoning-effort list for that target (1 to 16 unique strings, each matching `^[a-z][a-z0-9_-]{0,31}$`). When absent the built-in list applies: codex `minimal, low, medium, high, xhigh, max, ultra`; claude-code `low, medium, high, xhigh, max`. A per-call value outside the list is refused with `PEER_ARGS_INVALID` (field `reasoningEffort`), a config default outside it with `PEER_CONFIG_INVALID`.
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`: permission mode and allowed tools for `delegate`; `review` / `consult` use the read-only tool set and `--no-session-persistence`.
 - `records`: record directory name, retention after acceptance, retention for failed/disputed work, sweep interval, and the Claude sessions directory.
-- `bridge`: the DSH endpoint used by the cleanup sweeper; the token comes from `DSH_MCP_TOKEN` first, with an optional `credentialFile` as the fallback.
+- `bridge`: the DSH endpoint used by the cleanup sweeper; the token comes from `DSH_MCP_TOKEN` first, then that root's own `credentialFile` (each peer config points at its own controller token file).
 - `limits`: timeout, concurrency and the other bounds.
 
 There is deliberately no free-form argument list: every CLI flag is generated from a validated field, so configuration cannot reopen the read-only sandbox.
@@ -261,7 +261,7 @@ There is deliberately no free-form argument list: every CLI flag is generated fr
 
 1. Call `bridge_capabilities`: the host should report `version` `1.5.0` (the plugin version is 1.7.0 — these differ). `controllerIdentity.self` / `admin` must match the controller token you are using, and `controllers` lists the configured IDs.
 2. Call `peer_capabilities`: `self` should be `claude-code` on the Claude side and `codex` on the Codex side; `chain` shows your position, and every peer/mode pair states whether it is allowed and, if not, with which error code.
-3. Run one disposable delegate in each direction (Claude → Codex, Codex → Claude): the delegate should see only the plugin's two MCP servers and still submit one cheap DSH task; the user's other MCP servers must be absent (an explicit behaviour change since 1.7.0).
+3. Run one disposable delegate in each direction. Claude → Codex: confirm the delegate inherited the root's (Claude's) non-administrator identity and `via` chain and can complete one cheap DSH submission; the Codex side keeps its own MCP configuration, so do not claim Codex excludes the user's other MCP servers. Codex → Claude: confirm the Claude Code delegate sees only the plugin's two MCP servers and that the user's other MCP servers are absent (the explicit narrowing since 1.7.0), and that it can still submit one cheap DSH task.
 
 ## Usage
 
@@ -284,7 +284,7 @@ There is one rule: **the harness you are talking to is the root controller of th
 - **Path fences**: a worker may only read `scope.readRoots` and write `writeRoots`; going outside is an explicit refusal, not a hint.
 - **Network**: available only when the packet grants it.
 - **Read-only peers cannot write**: `consult` / `review` give the peer a read-only sandbox and a read-only tool set and disable plugins that could act; a read-only Claude run leaves no session behind.
-- **Claude delegate MCP surface is narrowed**: a delegate runs with `--strict-mcp-config` and an MCP configuration containing only the plugin's two entries; the user's other MCP servers are deliberately excluded (an explicit behaviour change from 1.7.0). Smoke-test both directions after an upgrade (see Verify).
+- **Only the Claude Code delegate's MCP surface is narrowed**: when Claude Code is the delegate (including Codex → Claude), it runs with `--strict-mcp-config` and an MCP configuration containing only the plugin's two entries, and the user's other MCP servers are deliberately excluded (an explicit behaviour change from 1.7.0). When Claude → Codex, the Codex delegate does not get this two-entry restriction: smoke-test that direction for inherited root identity/carrier only, and do not claim it excludes other MCP servers. Smoke-test both directions after an upgrade (see Verify).
 - **No credential fallback**: when a delegate or child loses its environment token, the carrier and peer client refuse instead of reading a local credential file; tokens are never written to job records, prompts, argv or logs.
 - **Delegation chain enforcement**: no self target, no harness already on the chain, bounded hops and delegate depth; a malformed chain is refused rather than repaired.
 - **Only recorded sessions are cleaned**: the sweeper touches only sessions listed in a closeout record, and only while the record file exists; anything not in a record is never touched.

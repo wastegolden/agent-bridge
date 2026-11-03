@@ -69,40 +69,58 @@ coding task. Full schema, validation limits, audit and credential details:
    generates an **overlap** host config that includes the temporary `legacy`
    administrator plus a **final** config that omits it; the deploy config's `identity`
    block carries `credentialDirectory`, `migrationBackupDirectory` and an optional
-   `legacyTokenFile`. A dry run generates no token. Point each client at the overlap
-   config for the window.
+   `legacyTokenFile`. Its `controllers` + `identityMigrationBackupDirectory` output is
+   an **identity fragment** to merge into the complete host config (keeping
+   `dataDirectory`, `ownerId` and the other host fields), not a standalone config; the
+   overlap and final configs are each complete. It also prepares one separate
+   agent-peer config per root (shared `stateDir`, each with its own
+   `bridge.credentialFile`), splitting any legacy single shared file. A dry run
+   generates no token. Point each client at the overlap config for the window, with
+   Claude's token in its root launch environment and Codex using its own credential
+   file and peer config.
 3. **Stop and back up** under the temporary directory: the installed package/manifest,
    both host configs, `<dataDirectory>` (`tasks.sqlite` including WAL/SHM because the
    events live there, and worktrees that matter), the client configs (Claude plugin,
-   Codex `.mcp.json`, agent-peer state) and the token files.
-4. **First restart (overlap).** Start with the overlap config. The store snapshots the
+   Codex `.mcp.json`, each root's agent-peer config and shared state) and the token
+   files. The live controller token files are not disposable: keep them and their
+   backups.
+4. **Install the new package before the first restart.** Run the uninstall/install
+   sequence (README install section) while the host is stopped. The first restart must
+   load the identity-aware code that understands `controllers` and performs the store
+   migration; never restart the old package with the new configuration.
+5. **First restart (overlap).** Start with the overlap config. The store snapshots the
    old database into `identityMigrationBackupDirectory` and migrates 0 → 1; a mount
    failure (`STORE_BACKUP_FAILED` / `STORE_MIGRATION_FAILED`) means the host did not
-   start and the old config can still be restored. Verify
+   start and the old config can still be restored. Only the shipped v0 schema may
+   migrate; only the shipped v1 schema may open as v1, and a version/shape mismatch is
+   `STORE_SCHEMA_UNSUPPORTED`. Verify
    `bridge_capabilities.controllerIdentity` (`self`, `admin`, `controllers`) and that
    historical tasks stay readable (`bridge_list` with `submittedBy:null`). During the
    window `legacy` is an administrator for migration/repair only: every mutation of a
    foreign or **historical** task uses an explicit `override:{reason}`, recorded in the
    audit trail; do not use the legacy token for normal work.
-5. **Dual-direction disposable-task smoke.** Submit a cheap read-only task from each
+6. **Dual-direction disposable-task smoke.** Submit a cheap read-only task from each
    root and check `submittedBy` (root `via:null`); run one disposable delegate in each
    direction (Claude → Codex and Codex → Claude) and confirm the delegate's tasks
-   belong to the root principal with client-declared `via`; confirm the Claude
-   delegate's strict MCP surface (only the plugin's two entries) and a cheap bridge
-   call; confirm a non-admin delegate cannot mutate the other root's task and that an
-   admin credential is refused for delegation before spawn; then archive/clean or
-   discard the disposable tasks deliberately.
-6. **Second restart (final).** Remove the `legacy` entry and its token file; start with
+   belong to the root principal with client-declared `via`; on Codex → Claude confirm
+   the Claude delegate's strict MCP surface (only the plugin's two entries) and a cheap
+   bridge call; on Claude → Codex confirm the delegate inherited the root
+   identity/carrier and can submit, but do not claim Codex excludes other MCP servers;
+   confirm a non-admin delegate cannot mutate the other root's task and that an admin
+   credential is refused for delegation before spawn; then archive/clean or discard the
+   disposable tasks deliberately.
+7. **Second restart (final).** Remove the `legacy` entry and its token file; start with
    the final config (a v1 store is not migrated again). Verify the old legacy token now
    returns HTTP 401 `{"error":"unauthorized"}`, the remaining clients authenticate,
    and historical tasks are still readable (mutating them now needs a remaining
    administrator plus an override reason).
-7. **Rollback is only a pre-work option.** The pre-migration snapshot plus the old
+8. **Rollback is only a pre-work option.** The pre-migration snapshot plus the old
    package/config/clients can be restored **before any real new work exists**.
    Restoring it after new tasks/events/clients exist discards that work and leaves
    clients inconsistent with the identity; real tasks then require **forward repair**
-   under the new schema, not a data rollback. Keep the snapshot until the upgrade is
-   accepted and real work has resumed.
+   under the new schema, not a data rollback. Keep the snapshot and the live controller
+   token files until the upgrade is accepted and real work has resumed; delete only
+   intended test artifacts and, after the final restart, the temporary `legacy` token.
 
 ## Boundaries
 

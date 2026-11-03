@@ -167,16 +167,19 @@ session at all (`--no-session-persistence`), so they cannot be resumed.
 - **Codex, delegate:** `workspace-write` sandbox in `cwd` (+ `addDirs`); the plugin's
   `dsh_project` and `agent_peer` tools are pre-approved (`default_tools_approval_mode:
   approve`), so the sub-controller can run DSH tasks and consult further — but never call a
-  harness on its chain. Other MCP servers need approval and are refused in headless runs.
+  harness on its chain. The Codex delegate keeps its own MCP configuration; this bridge
+  does not exclude the user's other MCP servers on that side.
 - **Claude Code, consult/review:** only read-only built-ins exist (`--tools`), write tools are
   denied, no MCP servers. **Claude Code, delegate:** `acceptEdits`, the configured
-  `delegateAllowedTools`, and `--strict-mcp-config` with exactly the plugin's two MCP
-  entries (`dsh_project` and `agent_peer`). The user's other MCP servers are deliberately
-  excluded from the delegate session — an explicit behaviour change from 1.7.0, so after
-  an upgrade smoke-test one delegate in each direction (Claude → Codex and Codex →
-  Claude) and confirm the two plugin servers work and the others are absent. A headless
-  `claude -p` needs its own login (`claude` → `/login`); until then calls fail with
-  "Not logged in" and are reported as failed jobs.
+  `delegateAllowedTools`, and — only when Claude Code is the delegate (including
+  Codex → Claude) — `--strict-mcp-config` with exactly the plugin's two MCP entries
+  (`dsh_project` and `agent_peer`). The user's other MCP servers are deliberately
+  excluded from that delegate session — an explicit behaviour change from 1.7.0. After
+  an upgrade, smoke-test both directions: on Codex → Claude confirm the two plugin
+  servers work and the others are absent; on Claude → Codex confirm the delegate
+  inherited the root identity/carrier and can submit, without claiming Codex excludes
+  other MCP servers. A headless `claude -p` needs its own login (`claude` → `/login`);
+  until then calls fail with "Not logged in" and are reported as failed jobs.
 - The chain survives a harness that filters MCP environments: the peer server records every
   child in a lineage ledger and the callee's server recovers its chain from it. This guards
   against accidental loss, not against a hostile sub-controller with shell access.
