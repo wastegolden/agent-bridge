@@ -226,11 +226,15 @@ export class TaskStore {
           settlementEvidence:followupSettlementEvidence(task.result)
         };
       }else{
-        // N2: a follow-up attempt refused BEFORE dispatch (dispatched:false) has no
-        // receipt of its own. Its session binding is the one the refused round already
-        // recorded, and it stays reusable so one refusal never strands the session.
+        // N2: a follow-up attempt that never crossed the host boundary has no receipt of
+        // its own: it was refused before dispatch (dispatched:false), or it was cancelled
+        // or interrupted before dispatch started. Its session binding is the one the
+        // follow-up entry that minted it already recorded, and it stays reusable so one
+        // such attempt never strands the session. A dispatch that started without a
+        // receipt is ambiguous and stays refused.
         const refusal=task.dispatchFailure;
-        const prior=refusal&&refusal.dispatched===false&&refusal.attemptId===task.attemptId
+        const neverDispatched=task.dispatchStarted!==true||(refusal&&refusal.dispatched===false&&refusal.attemptId===task.attemptId);
+        const prior=neverDispatched
           ?history.find(entry=>entry&&entry.attemptId===task.attemptId&&entry.boundAttempt)
           :null;
         if(!prior)fail('SESSION_NOT_READY','A follow-up requires a persisted receipt (or a prior bound follow-up attempt) for the session');

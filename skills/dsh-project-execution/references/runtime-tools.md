@@ -238,8 +238,11 @@ authority; text containing a reserved material delimiter is refused with
   stays readable in the round history, and the task can be followed up again with a
   NEW `followupId` and `afterAttemptId` set to the failed attempt's `attemptId`. The
   retry reuses the session binding recorded as the refused attempt's `boundAttempt`, so
-  one refusal does not make the task permanently unfollowable. A refusal is never a
-  reason to submit a replacement task or to open a second session.
+  one refusal does not make the task permanently unfollowable. The same holds for a
+  follow-up that was cancelled (or interrupted by a bridge restart) before its dispatch
+  started. Only a dispatch that started without a receipt is ambiguous and stays
+  refused with `SESSION_NOT_READY`. A refusal is never a reason to submit a replacement
+  task or to open a second session.
 - **Cold host restart.** The follow-up reuses the live guarded agent of the owned
   session. If the DSH host restarted and no live agent remains, the request is refused
   (the reported blocker is `guarded-agent-absent`) — the same limitation as
