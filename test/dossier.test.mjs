@@ -48,7 +48,7 @@ test('bridge_dossier returns a fresh closeout dossier that never copies material
   const again=f.service.dossier(submitted.id);
 
   // Exactly the specified keys, no more and no fewer.
-  assert.deepEqual(Object.keys(dossier).sort(),['acknowledgement','archive','attempt','contractVersion','controller','createdAt','effectiveModel','integration','phase','projectId','refresh','request','result','review','revision','role','rootTask','schemaVersion','sessionId','stats','status','stop','taskId','title','updatedAt','workspace']);
+  assert.deepEqual(Object.keys(dossier).sort(),['acknowledgement','archive','attempt','attemptId','contractVersion','controller','createdAt','effectiveModel','integration','phase','projectId','refresh','request','result','review','revision','role','rootTask','rounds','schemaVersion','sessionId','stats','status','stop','taskId','title','updatedAt','workspace']);
   assert.deepEqual(Object.keys(dossier.request).sort(),['acceptance','budget','cwd','materials','metadata','model','objective','scope','workspace']);
   assert.deepEqual(Object.keys(dossier.acknowledgement).sort(),['accepted','artifactState','pinned','resultCollected']);
   assert.deepEqual(Object.keys(dossier.stop).sort(),['activeJobs','stopConfirmed']);
