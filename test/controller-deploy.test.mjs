@@ -34,13 +34,22 @@ const slash = (value) => value.replaceAll('\\', '/');
 
 let counter = 0;
 
+// TEST_ROOT is written with forward slashes while path.join/path.resolve produce
+// backslashes on Windows, so compare resolved paths via path.relative instead of a
+// raw prefix startsWith (which also accepts a sibling such as ...-tests-evil).
+function isWithinTestRoot(directory) {
+  const relative = path.relative(path.resolve(TEST_ROOT), path.resolve(directory));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 async function makeSandbox(t) {
   counter += 1;
   const directory = path.join(TEST_ROOT, `${process.pid}-${Date.now()}-${counter}`);
   await fsp.mkdir(directory, { recursive: true });
   t.after(async () => {
-    assert.ok(directory.startsWith(TEST_ROOT), `refusing to clean outside the test root: ${directory}`);
-    await fsp.rm(directory, { recursive: true, force: true });
+    const resolved = path.resolve(directory);
+    assert.ok(isWithinTestRoot(directory), `refusing to clean outside the test root: ${resolved}`);
+    await fsp.rm(resolved, { recursive: true, force: true });
   });
   return directory;
 }
@@ -254,7 +263,7 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
   }, null, 2)}\n`);
 
   const env = { ...process.env, KEEP_ME: 'yes', DSH_MCP_TOKEN: 'shared-decoy', dsh_mcp_token: 'shared-decoy', Dsh_Bridge_Credential_File: 'shared-file', DSH_BRIDGE_DELEGATED: '1', DSH_BRIDGE_DISABLED: '1' };
-  await runDeploy(config, packageRoot, { spawnImpl: spawn.impl, env });
+  const deployRun = await runDeploy(config, packageRoot, { spawnImpl: spawn.impl, env });
   assert.ok(spawn.calls.length > 0, 'deploy should exercise the external CLI calls');
   for (const call of spawn.calls) {
     assert.equal(envValue(call.options.env, 'DSH_MCP_TOKEN'), undefined);
@@ -284,11 +293,22 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
   const layout = identityLayout(config);
   const claudeToken = (await fsp.readFile(layout.tokenFiles.claude, 'utf8')).trim();
   const codexToken = (await fsp.readFile(layout.tokenFiles.codex, 'utf8')).trim();
+  for (const text of [deployRun.stdout, deployRun.stderr]) {
+    assert.equal(text.includes(claudeToken), false, 'deploy output must not contain the Claude token');
+    assert.equal(text.includes(codexToken), false, 'deploy output must not contain the Codex token');
+  }
   for (const [id, file] of Object.entries(layout.launcherFiles)) {
     const source = await fsp.readFile(file, 'utf8');
     assert.equal(source.includes(claudeToken), false, `${id} launcher must not contain the Claude token`);
     assert.equal(source.includes(codexToken), false, `${id} launcher must not contain the Codex token`);
     assert.equal(source.includes('DSH_MCP_TOKEN = token') || source.includes('DSH_BRIDGE_CREDENTIAL_FILE = TOKEN_FILE'), true);
+    // The regression passed the whole {claude,codex} map as CLI, so the generated
+    // wrapper must embed one string (the selected root CLI), never an object.
+    const cliLine = source.split('\n').find((line) => line.startsWith('const CLI = '));
+    assert.equal(typeof cliLine, 'string', `${id} launcher must declare its CLI constant`);
+    const selectedCli = JSON.parse(cliLine.slice('const CLI = '.length, -1));
+    assert.equal(typeof selectedCli, 'string', `${id} launcher must spawn one CLI string, not an object`);
+    assert.equal(path.resolve(selectedCli), path.resolve(process.execPath), `${id} launcher must embed the selected root CLI`);
   }
 
   const capture = path.join(sandbox, 'capture.mjs');

@@ -447,7 +447,8 @@ async function writeLaunchers(config, layout, dryRun, step, resolveExecutable) {
   for (const id of ['claude', 'codex']) {
     const source = launcherSource({
       mode: id,
-      cli,
+      // The launcher spawns exactly one root CLI string; pass only this root's selection.
+      cli: cli[id],
       tokenFile: layout.tokenFiles[id],
       peerConfigPath: layout.peerFiles[id],
       bridgeUrl: config.bridgeUrl,
