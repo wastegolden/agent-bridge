@@ -13,6 +13,10 @@ jobs:
     # PowerShell CIM there and `ps` elsewhere.
     runs-on: windows-latest
     timeout-minutes: 20
+    # Tests put temporary files under BRIDGE_TEST_TMP (test/helpers/test-root.mjs); the
+    # local layout under F:	emp does not exist on hosted runners.
+    env:
+      BRIDGE_TEST_TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
