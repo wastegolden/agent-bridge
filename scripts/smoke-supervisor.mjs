@@ -327,6 +327,19 @@ async function main() {
       }
       return records;
     };
+    // The project callback is enqueued asynchronously after the project task settles, so a
+    // single immediate read races the enqueue (the same race scripts/smoke-recurrent.mjs
+    // already waits out). Observe for a bounded time; never synthesize a record and never
+    // treat "not yet written" as "not emitted".
+    const observeOutboxRecords = async (taskId, expected = 1, timeoutMs = 30000) => {
+      const deadline = Date.now() + timeoutMs;
+      let records = [];
+      for (;;) {
+        records = (await listOutbox()).filter((record) => record.taskId === taskId);
+        if (records.length >= expected || Date.now() > deadline) return records;
+        await sleep(200);
+      }
+    };
     const waitProject = async (taskId, timeoutMs = 240000) => {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
@@ -393,8 +406,10 @@ async function main() {
     });
 
     await check('sup-ok: exactly one completion callback per project and no per-worker wake', async () => {
+      const mine = await observeOutboxRecords(okTask.id);
+      // Once the project callback is observed, read the whole outbox for the worker and
+      // total-count assertions below.
       const records = await listOutbox();
-      const mine = records.filter((record) => record.taskId === okTask.id);
       assert.equal(mine.length, 1, `one project callback expected, got ${mine.length}`);
       assert.equal(mine[0].kind, 'completed');
       assert.match(String(mine[0].summary), /writer-c/);
@@ -437,8 +452,7 @@ async function main() {
       const round = refuseTask.project.rounds[refuseTask.project.rounds.length - 1];
       assert.match(String(round.text), /rootRefused=true/);
       assert.match(String(round.text), /modelRefused=true/);
-      const records = await listOutbox();
-      assert.equal(records.filter((record) => record.taskId === refuseTask.id).length, 1);
+      assert.equal((await observeOutboxRecords(refuseTask.id)).length, 1);
       return { text: String(round.text).slice(0, 200) };
     });
 
@@ -491,8 +505,7 @@ async function main() {
       assert.equal(worker.attempts.length, 1, 'a cancelled worker is never retried as an ordinary failure');
       const workerTask = (await call('bridge_check', { taskId: target })).task;
       assert.equal(workerTask.status, 'cancelled');
-      const records = await listOutbox();
-      const mine = records.filter((record) => record.taskId === settled.id);
+      const mine = await observeOutboxRecords(settled.id);
       assert.equal(mine.length, 1);
       assert.equal(mine[0].kind, 'failed');
       return { workerState: worker.state, project: settled.project.status };
