@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { createBridgeClient } from '../src/peer/bridge-client.mjs';
 import { childEnvironment } from '../src/peer/cli.mjs';
@@ -15,19 +14,18 @@ import { createPeerServer } from '../src/peer/server.mjs';
 import { readProcessTable } from '../src/peer/lineage.mjs';
 import { createCodexThreadClient } from '../src/peer/codex-threads.mjs';
 import { createCarrier } from '../src/bridge-carrier.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
 const TOKEN = 'a3-peer-root-test-token-0123456789abcdef';
 const OTHER_TOKEN = 'a3-peer-local-test-token-fedcba9876543210';
 const URL = 'http://127.0.0.1:3199/mcp/controller-test';
-const TEMP_ROOT = fileURLToPath(new globalThis.URL('../.plans/test-tmp/', import.meta.url));
 const result = (value) => ({ status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { structuredContent: value } }) });
 const identity = (self = 'claude-code') => ({ controllerIdentity: { enabled: true, self, admin: false } });
 
 // Real job/lineage persistence, deterministic child and HTTP seams. Tests using a
 // real child below retain their assertions when the sandbox rejects spawn.
 async function fixture(t, { self = 'claude-code', env = {}, fileOnly = false, bridge = true, response = identity(self), realChild = false, resolveLineage = null } = {}) {
-  await mkdir(TEMP_ROOT, { recursive: true });
-  const dir = await mkdtemp(path.join(TEMP_ROOT, 'controller-peer-'));
+  const dir = makeTestDir('controller-peer');
   const credentialFile = path.join(dir, 'root.token');
   await writeFile(credentialFile, TOKEN);
   const config = normalizePeerConfig({
@@ -308,7 +306,7 @@ test('childEnvironment removes Windows aliases before explicitly injecting a pre
 
 test('PowerShell and ps process queries strip only bridge credentials and preserve supplied environment', () => {
   for (const platform of ['win32', 'linux']) {
-    const source = { PATH: 'preserved', psMODULEpath: 'custom-modules', TEMP: 'F:\\temp', SYSTEMROOT: 'C:\\Windows',
+    const source = { PATH: 'preserved', psMODULEpath: 'custom-modules', TEMP: 'fixture-temp', SYSTEMROOT: 'C:\\Windows',
       DSH_MCP_TOKEN: TOKEN, dsh_mcp_token: OTHER_TOKEN, Dsh_Bridge_Credential_File: 'file', dsh_bridge_delegated: '1', DSH_BRIDGE_DISABLED: '1', OTHER: '' };
     const before = { ...source };
     const calls = [];

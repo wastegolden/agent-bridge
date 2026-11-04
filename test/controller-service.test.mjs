@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { TaskStore } from '../src/store.mjs';
 import { BridgeService } from '../src/service.mjs';
 import { validatePacket } from '../src/contracts.mjs';
 import { BridgeSupervisor, HostReservationLedger } from '../src/supervisor.mjs';
 import { SupervisorProjectRuntime, createProjectRecord, normalizeProjectConfig, resolveProjectGrant } from '../src/long-task.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
 const via={chain:['claude-code','codex'],rootTask:'root-1'};
 const model={provider:'deepseek-official',model:'deepseek-flash',reasoningEffort:'high'};
@@ -15,7 +15,7 @@ function packet(dir,key='shared',extra={}){
   return {schemaVersion:1,idempotencyKey:key,revision:1,projectId:'identity',title:key,objective:'read one file',cwd:dir,role:'investigate',acceptance:['evidence'],scope:{readRoots:[dir],writeRoots:[],allowedTools:['read'],allowShell:false,allowNetwork:false,allowDelegation:false},materials:[],contractVersion:'1',...extra};
 }
 function fixture(t){
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-controller-service-'));
+  const dir=makeTestDir('bridge-controller-service');
   const store=new TaskStore({directory:dir,ownerId:'owner'});
   let preflights=0,modelCalls=0;
   const adapter={models:async()=>{modelCalls++;return [{provider:'deepseek-official',models:[{id:'deepseek-flash'}]}];},preflight:async()=>{preflights++;return {ok:true};},followup:async()=>{throw new Error('unexpected dispatch');}};

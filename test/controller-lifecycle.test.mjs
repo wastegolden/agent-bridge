@@ -42,8 +42,8 @@ import { normalizePeerConfig } from '../src/peer/config.mjs';
 import { createPeerJobs } from '../src/peer/jobs.mjs';
 import { createPeerServer } from '../src/peer/server.mjs';
 import { createCarrier } from '../src/bridge-carrier.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
-const TEMP_ROOT = 'F:/temp/agent-bridge-upstream';
 const MODEL = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high' };
 const OVERRIDE = { reason: '  Inspect historical task  ' };
 const TOKEN = {
@@ -100,8 +100,7 @@ function makeAdapter(counters = {}) {
 }
 
 function bridgeFixture(t, { kick = false } = {}) {
-  fs.mkdirSync(TEMP_ROOT, { recursive: true });
-  const directory = fs.mkdtempSync(path.join(TEMP_ROOT, 'controller-lifecycle-'));
+  const directory = makeTestDir('controller-lifecycle');
   const store = new TaskStore({ directory, ownerId: 'owner' });
   const counters = { start: 0, followup: 0, reconsider: 0 };
   const adapter = makeAdapter();
@@ -412,15 +411,14 @@ async function peerServer(t, { directory, stateDir, self, token, url }) {
 }
 
 function peerDirectory(prefix) {
-  fs.mkdirSync(TEMP_ROOT, { recursive: true });
-  return fs.mkdtempSync(path.join(TEMP_ROOT, prefix));
+  return makeTestDir(prefix);
 }
 
 test('both delegate directions inject the verified root credential and submit through the real bridge', async t => {
   const bridge = bridgeFixture(t);
   const { request, url } = await serve(t, bridge);
   for (const [rootId, target] of [['claude-code', 'codex'], ['codex', 'claude-code']]) {
-    const directory = peerDirectory(`controller-lifecycle-peer-${rootId}-`);
+    const directory = peerDirectory(`controller-lifecycle-peer-${rootId}`);
     const peer = await peerServer(t, { directory, stateDir: path.join(directory, 'state'), self: rootId, token: TOKEN[rootId], url });
     const asked = await peer.server.call('peer_ask', {
       target, mode: 'delegate', prompt: 'perform the bounded test', cwd: directory,
@@ -482,7 +480,7 @@ test('both delegate directions inject the verified root credential and submit th
 test('administrator bridge credentials are refused before any delegate spawn or child environment', async t => {
   const bridge = bridgeFixture(t);
   const { url } = await serve(t, bridge);
-  const directory = peerDirectory('controller-lifecycle-admin-guard-');
+  const directory = peerDirectory('controller-lifecycle-admin-guard');
   const peer = await peerServer(t, { directory, stateDir: path.join(directory, 'state'), self: 'claude-code', token: TOKEN.operator, url });
   await assert.rejects(
     peer.server.call('peer_ask', {

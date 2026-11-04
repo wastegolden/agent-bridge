@@ -117,7 +117,7 @@ async function launchHost({ rootPrefix, gitRepo }) {
 
   const hostConfig = {
     dataDirectory: path.join(root, 'state'),
-    credentialFile: path.join(root, 'bridge-token'),
+    controllers: [{ id: 'codex', tokenFile: path.join(root, 'bridge-token') }],
     ownerId: 'codex-bridge-supervisor',
     agentPreset: 'standard',
     maxConcurrent: 16,
@@ -126,7 +126,7 @@ async function launchHost({ rootPrefix, gitRepo }) {
     rootCallbackGrants: { [GRANT_ID]: { targetId: TARGET } }
   };
   const token = randomBytes(32).toString('base64url');
-  fs.writeFileSync(hostConfig.credentialFile, token, { mode: 0o600 });
+  fs.writeFileSync(hostConfig.controllers[0].tokenFile, token, { mode: 0o600 });
   fs.writeFileSync(
     path.join(profile, 'package.json'),
     JSON.stringify({ name: 'bridge-supervisor-profile', private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } } })

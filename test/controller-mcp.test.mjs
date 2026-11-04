@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { once } from 'node:events';
@@ -10,6 +9,7 @@ import { createDispatcher, createMcpHandler, TOOLS, validateToolPolicies } from 
 import { TaskStore } from '../src/store.mjs';
 import { BridgeService } from '../src/service.mjs';
 import { validatePacket } from '../src/contracts.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
 const ids = ['claude-code', 'codex', 'legacy', 'operator'];
 const context = (id = 'codex', admin = false, via = null) => ({ principal: { id, admin }, via, controllerIds: ids });
@@ -21,7 +21,7 @@ function packet(directory, key, extra = {}) {
 }
 
 function fixture(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'controller-mcp-'));
+  const directory = makeTestDir('controller-mcp');
   const store = new TaskStore({ directory, ownerId: 'owner' });
   const counts = { adapter: 0, workspace: 0, business: 0 };
   const adapter = {

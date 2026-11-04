@@ -28,9 +28,10 @@ import { createMcpHandler, TOOLS } from '../src/mcp.mjs';
 import { TaskStore } from '../src/store.mjs';
 import { BridgeService } from '../src/service.mjs';
 import { digest, validatePacket } from '../src/contracts.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
-// Contract section 10: every test temporary directory lives outside the worktree.
-const TEMP_ROOT = 'F:/temp/agent-bridge-upstream';
+// R6: the test-root helper decides the temporary root; no drive-letter or
+// directory-existence choice lives in test code.
 
 // The roster every fixture configures. `legacy` is a real controller ID; the legacy
 // administrator row reconfigures the SAME id with admin:true instead of inventing a
@@ -78,8 +79,7 @@ function packet(directory, key, extra = {}) {
 }
 
 function fixture(t, roster = BASE_ROSTER) {
-  fs.mkdirSync(TEMP_ROOT, { recursive: true });
-  const directory = fs.mkdtempSync(path.join(TEMP_ROOT, 'controller-permissions-'));
+  const directory = makeTestDir('controller-permissions');
   const store = new TaskStore({ directory, ownerId: 'owner' });
   const counts = { adapter: 0, preflight: 0, workspace: 0, project: 0, followup: 0, reconsider: 0 };
   const catalog = [{ provider: 'deepseek-official', models: [{ id: 'deepseek-flash' }] }];

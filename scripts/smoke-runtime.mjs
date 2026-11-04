@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(profile,'cordis.patch.yml'),`- insert:\n    - id: bri
 const token=randomBytes(32).toString('base64url');
 const credentialFile=path.join(root,'bridge-token');
 fs.writeFileSync(credentialFile,token,{mode:0o600});
-await install({sourceDir:source,profileDir:profile,requireHostEntry:true,hostConfig:{dataDirectory:path.join(root,'state'),credentialFile,ownerId:'codex-bridge-compat',agentPreset:'standard'}});
+await install({sourceDir:source,profileDir:profile,requireHostEntry:true,hostConfig:{dataDirectory:path.join(root,'state'),controllers:[{id:'codex',tokenFile:credentialFile}],ownerId:'codex-bridge-compat',agentPreset:'standard'}});
 const log=fs.openSync(path.join(root,'host.log'),'a');
 const child=spawn(process.execPath,[dshBin,'web','--port','0','--no-open'],{cwd:dshRoot,env:{...process.env,DSH_HOME:home},windowsHide:true,stdio:['ignore',log,log]});
 fs.closeSync(log);
@@ -66,10 +66,10 @@ try {
   assert.ok(endpoint,'DSH startup timed out');
   const initialized=await rpc('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'compat-smoke',version:'1'}});
   assert.equal(initialized.serverInfo.version,report.bridge);
-  const tools=await rpc('tools/list',{});assert.equal(tools.tools.length,19);
+  const tools=await rpc('tools/list',{});assert.equal(tools.tools.length,20);
   const catalog=await call('bridge_models');
   assert.match(JSON.stringify(catalog),/deepseek-flash/);
-  report.checks.push({name:'MCP initialization, 18 tools, current Flash model catalog',passed:true});
+  report.checks.push({name:'MCP initialization, 20 tools, current Flash model catalog',passed:true});
   for(const model of ['text','read','denied']) {
     const submitted=await submit(model);const task=await settled(submitted.id);
     assert.equal(task.status,'completed');assert.equal(task.stopConfirmed,true);

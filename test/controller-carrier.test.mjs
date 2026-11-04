@@ -130,13 +130,13 @@ test('shared bridge environment cleaning removes all case variants and preserves
   const source = {
     DSH_MCP_TOKEN: TOKEN, dsh_mcp_token: FILE_TOKEN,
     Dsh_Bridge_Credential_File: 'file', dsh_bridge_delegated: '1', DSH_BRIDGE_DISABLED: '1',
-    PATH: 'preserved-path', psMODULEpath: '', SystemRoot: 'C:\\Windows', TEMP: 'F:\\temp',
+    PATH: 'preserved-path', psMODULEpath: '', SystemRoot: 'C:\\Windows', TEMP: 'fixture-temp',
     DSH_BRIDGE_URL: 'http://127.0.0.1:3080/mcp/test', DSH_HOME: 'home',
     DSH_BRIDGE_WATCHDOG_CONFIG: 'watchdog-file', AGENT_BRIDGE_CHAIN: 'claude-code>codex', OTHER: undefined,
   };
   const before = { ...source };
   assert.deepEqual(stripBridgeCredentials(source), {
-    PATH: 'preserved-path', psMODULEpath: '', SystemRoot: 'C:\\Windows', TEMP: 'F:\\temp',
+    PATH: 'preserved-path', psMODULEpath: '', SystemRoot: 'C:\\Windows', TEMP: 'fixture-temp',
     DSH_BRIDGE_URL: 'http://127.0.0.1:3080/mcp/test', DSH_HOME: 'home',
     DSH_BRIDGE_WATCHDOG_CONFIG: 'watchdog-file', AGENT_BRIDGE_CHAIN: 'claude-code>codex', OTHER: undefined,
   });

@@ -116,7 +116,7 @@ function prepareState(rootPrefix) {
 
   const hostConfig = {
     dataDirectory: path.join(root, 'state'),
-    credentialFile: path.join(root, 'bridge-token'),
+    controllers: [{ id: 'codex', tokenFile: path.join(root, 'bridge-token') }],
     ownerId: 'codex-bridge-recurrent',
     agentPreset: 'standard',
     maxConcurrent: 16,
@@ -137,7 +137,7 @@ function prepareState(rootPrefix) {
     rootCallbackGrants: { [GRANT_ID]: { targetId: TARGET } }
   };
   const token = randomBytes(32).toString('base64url');
-  fs.writeFileSync(hostConfig.credentialFile, token, { mode: 0o600 });
+  fs.writeFileSync(hostConfig.controllers[0].tokenFile, token, { mode: 0o600 });
   fs.writeFileSync(
     path.join(profile, 'package.json'),
     JSON.stringify({ name: 'bridge-recurrent-profile', private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } } })
@@ -391,7 +391,7 @@ async function main() {
       assert.ok(caps.supervisorProjects.tools.includes('dsh_supervisor_project_complete'));
       assert.ok(caps.supervisorProjects.tools.includes('dsh_supervisor_project_block'));
       const tools = await rpc(first.endpoint, first.token, 'tools/list', {});
-      assert.equal(tools.tools.length, 19);
+      assert.equal(tools.tools.length, 20);
       assert.ok(tools.tools.some((entry) => entry.name === 'bridge_pause'));
       assert.ok(tools.tools.some((entry) => entry.name === 'bridge_resume'));
       const packet = tools.tools.find((entry) => entry.name === 'bridge_submit').inputSchema.properties.packet;

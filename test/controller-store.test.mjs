@@ -2,16 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { TaskStore, clarificationRequestHash, followupRequestHash } from '../src/store.mjs';
 import { validatePacket } from '../src/contracts.mjs';
+import { makeTestDir } from './helpers/test-root.mjs';
 
 const identity={submittedBy:'codex',via:{chain:['claude-code','codex'],rootTask:'root-1'}};
 const legacySchema='CREATE TABLE tasks(id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(owner,idem)); CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX task_events ON events(task_id,seq)';
 function directory(t){
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-controller-store-'));
+  const dir=makeTestDir('bridge-controller-store');
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   return dir;
 }

@@ -31,16 +31,13 @@ import { TaskStore } from '../src/store.mjs';
 import { BridgeService } from '../src/service.mjs';
 import { validatePacket } from '../src/contracts.mjs';
 import { mountBridge } from '../src/bootstrap.mjs';
+import { testDir } from './helpers/test-root.mjs';
 
-const TEMP_ROOT = 'F:/temp/agent-bridge-upstream';
 const LEGACY_SCHEMA = 'CREATE TABLE tasks(id TEXT PRIMARY KEY, owner TEXT NOT NULL, idem TEXT NOT NULL, hash TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(owner,idem)); CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX task_events ON events(task_id,seq)';
 const OWNER = 'd2-owner';
 
-function tempDirectory(t, prefix = 'controller-upgrade-') {
-  fs.mkdirSync(TEMP_ROOT, { recursive: true });
-  const directory = fs.mkdtempSync(path.join(TEMP_ROOT, prefix));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  return directory;
+function tempDirectory(t, prefix = 'controller-upgrade') {
+  return testDir(t, prefix);
 }
 
 function packet(directory, key, extra = {}) {
@@ -285,7 +282,7 @@ test('v0 migration preserves every multi-round binding and result and keeps null
 });
 
 test('illegal identity/mount configuration refuses before mutating an existing v0 store', async t => {
-  const base = tempDirectory(t, 'controller-upgrade-mount-');
+  const base = tempDirectory(t, 'controller-upgrade-mount');
   const credentials = path.join(base, 'credentials');
   fs.mkdirSync(credentials);
 
@@ -399,7 +396,7 @@ test('illegal identity/mount configuration refuses before mutating an existing v
 });
 
 test('legacy credential removal leaves historical tasks readable and override-audited over real HTTP', async t => {
-  const directory = tempDirectory(t, 'controller-upgrade-legacy-');
+  const directory = tempDirectory(t, 'controller-upgrade-legacy');
   const backups = path.join(directory, 'backups');
   const history = buildV1History(directory);
   const db = demoteToV0(directory, history);

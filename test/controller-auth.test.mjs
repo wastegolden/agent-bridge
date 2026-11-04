@@ -1,16 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { loadControllerRegistry, parseViaHeaders } from '../src/controller-auth.mjs';
 import { mountBridge } from '../src/bootstrap.mjs';
 import { acquireHostLease } from '../src/host-lease.mjs';
+import { testDir } from './helpers/test-root.mjs';
 
 function fixture(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'controller-auth-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const directory = testDir(t, 'controller-auth');
   const credential = (id, token = `${id}-`.padEnd(64, 'x'), extra = {}) => {
     const tokenFile = path.join(directory, `${id}.token`);
     fs.writeFileSync(tokenFile, token);
