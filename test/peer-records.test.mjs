@@ -315,6 +315,7 @@ function backendTaskFixture() {
       role: 'implement',
       status: 'completed',
       controller: 'codex',
+      submittedBy: 'codex',
       request: {
         objective: 'Ship the parser.',
         acceptance: ['tests pass', 'no new deps'],
@@ -358,6 +359,7 @@ function peerJobFixture() {
 
 function recordInput(overrides = {}) {
   return {
+    owner: 'claude-code',
     recordId: 'rec-001',
     rootTask: 'task-1',
     title: 'Root task record',
@@ -438,13 +440,14 @@ test('renderRecord front block parses back with sessions and ids', () => {
     controller: 'claude-code',
     chain: 'claude-code',
     closedAt: new Date(CLOSED_AT).toISOString(),
+    owner: 'claude-code',
     outcome: 'accepted',
     keep: false,
     eligibleAt: new Date(ELIGIBLE_AT).toISOString(),
     bridgeTaskIds: ['t-1'],
     peerJobIds: ['peer-1700000000000-abcdef01'],
     sessions: [
-      { harness: 'dsh', id: 'sess-dsh-1', source: 't-1' },
+      { harness: 'dsh', id: 'sess-dsh-1', source: 't-1', submittedBy: 'codex' },
       { harness: 'codex', id: 'sess-peer-1', source: 'peer-1700000000000-abcdef01' },
     ],
   });

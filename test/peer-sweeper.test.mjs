@@ -67,10 +67,11 @@ async function makeStateDir(root) {
   return stateDir;
 }
 
-async function addRecord(stateDir, recordPath, { recordId, eligibleAt, keep = false, sessions }) {
+async function addRecord(stateDir, recordPath, { recordId, eligibleAt, keep = false, owner = null, sessions }) {
   await appendIndexEvent(stateDir, {
     kind: 'record',
     recordId,
+    owner,
     rootTask: `root-${recordId}`,
     title: recordId,
     projectRoot: path.dirname(recordPath),
@@ -99,6 +100,7 @@ function fakeCodex({ failRemove = 0 } = {}) {
         failuresLeft -= 1;
         const error = new Error('thread/delete failed');
         error.code = 'PEER_CODEX_APP_SERVER';
+        error.detail = { method: 'thread/delete', rpcCode: -32000 };
         throw error;
       }
     },
@@ -110,8 +112,18 @@ function fakeCodex({ failRemove = 0 } = {}) {
 
 function fakeBridge({ archiveError = null, cleanupError = null } = {}) {
   const calls = [];
+  const readCalls = [];
   return {
     calls,
+    readCalls,
+    async controllerIdentity() {
+      readCalls.push(['identity']);
+      return { enabled: true, self: 'codex', admin: false };
+    },
+    async dossier(source) {
+      readCalls.push(['dossier', source]);
+      return { submittedBy: 'codex' };
+    },
     async archive(source, revision) {
       calls.push(['archive', source, revision]);
       if (archiveError) throw archiveError;
@@ -184,6 +196,7 @@ test('sweepRecords: dryRun plans every session and writes nothing', async () => 
     assert.equal(report.actions[0].id, CODEX_ID);
     assert.deepEqual(codex.calls, []);
     assert.deepEqual(bridge.calls, []);
+    assert.deepEqual(bridge.readCalls, [['identity'], ['dossier', 'task-dsh']]);
     assert.equal(await readIndexText(stateDir), before);
   });
 });
@@ -505,7 +518,7 @@ test('sweepRecords: missing, ambiguous, directory-only and nested claude session
 // Validation
 // ---------------------------------------------------------------------------
 
-test('sweepRecords: invalid ids are refused before any client or filesystem call', async () => {
+test('sweepRecords: invalid ids are refused before any cleanup client or session filesystem call', async () => {
   await withTempDir(async (root) => {
     const stateDir = await makeStateDir(root);
     const recordPath = path.join(root, 'rec.md');
@@ -514,12 +527,13 @@ test('sweepRecords: invalid ids are refused before any client or filesystem call
     await mkdir(projects, { recursive: true });
     await addRecord(stateDir, recordPath, {
       recordId: 'r-bad',
+      owner: 'codex',
       eligibleAt: NOW - 1,
       sessions: [
         { harness: 'codex', id: 'not-a-uuid', source: 'task-codex' },
         { harness: 'claude-code', id: '../../escape', source: 'task-claude' },
-        { harness: 'dsh', id: 'sess-1', source: 'C:\\tasks\\t-1', revision: 1 },
-        { harness: 'dsh', id: 'sess-2', source: '   ', revision: 1 },
+        { harness: 'dsh', id: 'sess-1', source: 'C:\\tasks\\t-1', revision: 1, submittedBy: 'codex' },
+        { harness: 'dsh', id: 'sess-2', source: '   ', revision: 1, submittedBy: 'codex' },
       ],
     });
     const codex = fakeCodex();
@@ -574,7 +588,7 @@ test('sweepRecords: invalid ids are refused before any client or filesystem call
 // Absent clients
 // ---------------------------------------------------------------------------
 
-test('sweepRecords: absent clients and project directories report skipped instead of failing', async () => {
+test('sweepRecords: absent clients and project directories only report unavailability and preserve pending', async () => {
   await withTempDir(async (root) => {
     const stateDir = await makeStateDir(root);
     const recordPath = path.join(root, 'rec.md');
@@ -589,6 +603,7 @@ test('sweepRecords: absent clients and project directories report skipped instea
       ],
     });
 
+    const before = await readIndexText(stateDir);
     const report = await sweepRecords({
       stateDir,
       now: () => NOW,
@@ -601,11 +616,15 @@ test('sweepRecords: absent clients and project directories report skipped instea
     assert.deepEqual(
       report.actions.map((action) => [action.harness, action.action, action.state, action.note]),
       [
-        ['codex', 'delete', 'skipped', 'codex client unavailable'],
-        ['claude-code', 'delete', 'skipped', 'claude projects dir unavailable'],
-        ['dsh', 'archive', 'skipped', 'bridge unavailable'],
+        ['codex', 'delete', 'deferred', 'codex client unavailable'],
+        ['claude-code', 'delete', 'deferred', 'claude projects dir unavailable'],
       ],
     );
+    assert.deepEqual(report.deferred, [{ recordId: 'r-absent', harness: 'dsh', id: 'sess-1',
+      note: 'PEER_BRIDGE_UNAVAILABLE: bridge identity unavailable' }]);
+    assert.equal(await readIndexText(stateDir), before);
+    const record = (await readIndex(stateDir)).get('r-absent');
+    assert.deepEqual([...record.sessions.values()].map((session) => session.state), ['pending', 'pending', 'pending']);
   });
 });
 
@@ -629,6 +648,7 @@ test('sweepRecords: "already archived" counts as archived and a cleanup error ne
     });
     const calls = [];
     const bridge = {
+      ...fakeBridge(),
       async archive(source, revision) {
         calls.push(['archive', source, revision]);
         if (source === 'task-a') throw codedError('ALREADY_ARCHIVED', 'session already archived');

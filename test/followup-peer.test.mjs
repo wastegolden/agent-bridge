@@ -160,6 +160,7 @@ function makeJobs() {
  */
 function makeBridge({ dossiers = new Map(), texts = new Map() } = {}) {
   return {
+    controllerIdentity: async () => ({ enabled: true, self: 'codex', admin: false }),
     dossierCalls: [],
     resultTextCalls: [],
     async dossier(taskId) {
@@ -201,6 +202,7 @@ function dossierFixture({ taskId = 't-1', attemptId, rounds, sessionId = SESSION
     status,
     revision,
     controller: 'codex',
+    submittedBy: 'codex',
     sessionId,
     acknowledgement: { resultCollected: true, accepted: true, artifactState: 'none', pinned: false },
     stop: { stopConfirmed: true, activeJobs: 0 },
@@ -319,7 +321,8 @@ test('multi-round closeout embeds every round pinned by attemptId and hashes tas
     assert.deepEqual(positions, [...positions].sort((a, b) => a - b), 'the rounds are rendered in ascending order');
 
     // A follow-up reuses the same DSH session, so the session list is unchanged.
-    assert.deepEqual(result.sessions, [{ harness: 'dsh', id: SESSION_ID, source: 't-1', revision: 5 }]);
+    assert.equal(result.owner, 'codex');
+    assert.deepEqual(result.sessions, [{ harness: 'dsh', id: SESSION_ID, source: 't-1', revision: 5, submittedBy: 'codex' }]);
     assert.equal((await readIndexLines(fixture.stateDir)).length, 1);
   });
 });
@@ -534,6 +537,8 @@ function fakeBridge() {
   const calls = [];
   return {
     calls,
+    controllerIdentity: async () => ({ enabled: true, self: 'codex', admin: false }),
+    dossier: async () => ({ submittedBy: 'codex' }),
     async archive(source, revision) {
       calls.push(['archive', source, revision]);
       return { taskId: source, archived: true, uiHidden: true };

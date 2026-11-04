@@ -103,6 +103,7 @@ function makeJobs(records, results = new Map()) {
 /** An in-memory stand-in for createBridgeClient. */
 function makeBridge({ dossiers = new Map(), texts = new Map() } = {}) {
   return {
+    controllerIdentity: async () => ({ enabled: true, self: 'codex', admin: false }),
     dossierCalls: [],
     resultTextCalls: [],
     async dossier(taskId) {
@@ -127,6 +128,7 @@ function dossierFixture({ taskId = 't-1', status = 'completed', resultCollected 
     status,
     revision,
     controller: 'codex',
+    submittedBy: 'codex',
     sessionId,
     acknowledgement: { resultCollected, accepted: status === 'completed', artifactState: 'merged', pinned: false },
     stop: { stopConfirmed: true, activeJobs: 0 },
@@ -268,8 +270,9 @@ test('closeout writes one record, excludes it from git, and appends one index ev
     assert.ok(content.includes('- 结果: accepted'));
 
     assert.equal(result.eligibleAt, CLOSED_AT + 3 * DAY_MS);
+    assert.equal(result.owner, 'codex');
     assert.deepEqual(result.sessions, [
-      { harness: 'dsh', id: 'sess-dsh-1', source: 't-1', revision: 3 },
+      { harness: 'dsh', id: 'sess-dsh-1', source: 't-1', revision: 3, submittedBy: 'codex' },
       { harness: 'codex', id: 'sess-codex-1', source: JOB_CODEX },
     ]);
 
@@ -281,6 +284,7 @@ test('closeout writes one record, excludes it from git, and appends one index ev
     assert.equal(events.length, 1);
     const event = events[0];
     assert.equal(event.kind, 'record');
+    assert.equal(event.owner, 'codex');
     assert.equal(event.recordId, result.recordId);
     assert.equal(event.rootTask, ROOT_TASK);
     assert.equal(event.title, 'Task one');

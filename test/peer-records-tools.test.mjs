@@ -82,6 +82,10 @@ function makeBridge({ dossiers = new Map(), texts = new Map() } = {}) {
     calls,
     dossiers,
     texts,
+    async controllerIdentity() {
+      calls.push(['identity']);
+      return { enabled: true, self: 'claude-code', admin: false };
+    },
     async dossier(taskId) {
       calls.push(['dossier', taskId]);
       const dossier = dossiers.get(taskId);
@@ -293,6 +297,7 @@ test('record_closeout writes the record, record_list shows it and cleanup_run sw
     const listed = await rpc(server, 'record_list', {});
     assert.deepEqual(listed.records, [{
       recordId: closed.recordId,
+      owner: 'claude-code',
       title: 'Task one',
       rootTask: 'demo-1',
       path: closed.path,
@@ -347,6 +352,7 @@ test('record_closeout reads a bridge task through the injected bridge client and
     bridge.dossiers.set('t-1', {
       taskId: 't-1',
       title: 'DSH task',
+      submittedBy: 'claude-code',
       role: 'implement',
       status: 'completed',
       revision: 4,
@@ -360,18 +366,20 @@ test('record_closeout reads a bridge task through the injected bridge client and
     const closed = await rpc(server, 'record_closeout', { title: 'Bridge task', outcome: 'accepted', conclusion: 'Shipped.', bridgeTaskIds: ['t-1'] });
     assert.equal(closed.reused, false);
     assert.equal(closed.eligibleAt, CLOSED_AT + 3 * DAY_MS);
-    assert.deepEqual(bridge.calls, [['dossier', 't-1'], ['resultText', 't-1']]);
-    assert.deepEqual(closed.sessions, [{ harness: 'dsh', id: 'sess-dsh-1', source: 't-1', revision: 4 }]);
+    assert.equal(closed.owner, 'claude-code');
+    assert.deepEqual(bridge.calls, [['dossier', 't-1'], ['resultText', 't-1'], ['identity']]);
+    assert.deepEqual(closed.sessions, [{ harness: 'dsh', id: 'sess-dsh-1', source: 't-1', revision: 4, submittedBy: 'claude-code' }]);
     assert.equal(path.dirname(closed.path), path.join(project, '.agent-bridge', 'records'));
     const content = await readFile(closed.path, 'utf8');
     assert.ok(content.includes('RESULT: shipped with evidence.'));
-    assert.deepEqual((await rpc(server, 'record_list', {})).records[0].sessions, [{ harness: 'dsh', id: 'sess-dsh-1', state: 'pending' }]);
+    assert.deepEqual((await rpc(server, 'record_list', {})).records[0].sessions, [{ harness: 'dsh', id: 'sess-dsh-1', state: 'pending', submittedBy: 'claude-code' }]);
 
     // A later closeout is listed first: newest by closedAt.
     setNow(CLOSED_AT + DAY_MS);
     bridge.dossiers.set('t-2', {
       taskId: 't-2',
       title: 'Later DSH task',
+      submittedBy: 'claude-code',
       role: 'implement',
       status: 'completed',
       revision: 1,
