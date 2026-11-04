@@ -16,7 +16,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
          ┌──────────────┴──────────────┐
          │                             │
     dsh_project                   agent_peer
-    MCP HTTP                      MCP stdio
+    MCP stdio → HTTP              MCP stdio
          │                             │
          ▼                             ▼
    DSH 宿主桥                 另一个 harness 的无头 CLI
@@ -29,7 +29,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 | 部分 | 位置 | 作用 |
 |---|---|---|
 | DSH 宿主桥 | `dsh-host/index.cjs`、`src/*` | DSH 插件，在 DSH 宿主上提供 MCP 端点 `/mcp/codex-bridge-v1`（默认 `http://127.0.0.1:3080`），用 bearer 令牌鉴权 |
-| `dsh_project` | 两边的插件清单（MCP server） | Claude 根用 MCP HTTP 直连上面的端点（`Authorization: Bearer <DSH_MCP_TOKEN>`，令牌来自 Claude 启动环境）；Codex 的模板用 stdio 载体 `bin/bridge.mjs` 转发到同一个端点 |
+| `dsh_project` | 两边的插件清单（MCP server） | 两个根都用 stdio 载体 `bin/bridge.mjs`，从各自凭据文件读取令牌，再转发到宿主 HTTP 端点 |
 | `agent_peer` | `bin/peer-mcp.mjs`、`src/peer/*` | 用无头 CLI 在 Claude Code 与 Codex 之间做咨询 / 只读审查 / 子主控委派，带作业账本、链规则与收尾记录 |
 | skills | `skills/agent-bridge-routing`、`skills/dsh-project-execution` | 路由规则与 DSH 执行规范 |
 
@@ -56,7 +56,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 ### dsh_project
 
-`dsh_project` 在 Claude Code 一侧走 MCP HTTP：`.claude-plugin/plugin.json` 内联这个 server，直连宿主端点，bearer 令牌取自 Claude 启动环境的 `DSH_MCP_TOKEN`（每个根用自己那份）。Codex 一侧的模板 `.codex-mcp.json` 走 stdio：它用 `node ./bin/bridge.mjs` 启动仓库里的转发载体，把 MCP stdio 转发到同一个 HTTP 端点；载体从环境继承令牌，环境里没有时用 `DSH_BRIDGE_CREDENTIAL_FILE` 指向 Codex 自己的令牌文件。Claude 的 HTTP 入口和 Codex 的 stdio 载体是两条不同的客户端路径，按上文的对应关系配置。
+`dsh_project` 在两侧都通过 `bin/bridge.mjs` 把 MCP stdio 转发到宿主 HTTP 端点。Claude 的必填文件选项 `bridge_credential_file`、Codex 的两个 MCP 条目分别通过 `DSH_BRIDGE_CREDENTIAL_FILE` 指向各自根凭据；两侧的 `agent_peer` 同样使用各自文件。根启动环境应清除 `DSH_MCP_TOKEN`，根请求不发送链路头。delegate 继续优先使用 peer server 显式注入的环境 token，并记录委派链路。
 
 ### agent_peer
 
@@ -89,7 +89,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - **Windows**（已实测；其他平台有代码路径但未验证）。
 - **Claude Code 和/或 Codex**。
 - peer 调用要求每一侧的无头 CLI 各自登录过一次。
-- 每个根控制器一个 bearer 令牌文件（宿主配置 `controllers[].tokenFile`）。Claude 根把**自己那个控制器**的令牌放进启动环境的 `DSH_MCP_TOKEN`（HTTP 入口用它）；Codex 根清理共享环境令牌，用 `DSH_BRIDGE_CREDENTIAL_FILE` / 部署生成的凭据环境读自己的文件（stdio 载体用它）。不要多个控制器共用一个旧令牌。设好后要重开 Claude / Codex 才会读到。
+- 每个根控制器一个 bearer 令牌文件（宿主配置 `controllers[].tokenFile`），通过各自 MCP 配置的 `DSH_BRIDGE_CREDENTIAL_FILE` 读取。清除用户级和根进程级 `DSH_MCP_TOKEN`；禁止把 token 放入持久环境变量。设置后完全退出并重开 Claude / Codex。
 
 ## 安装
 
@@ -113,7 +113,7 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 
 4. 启动 DSH。
 
-如果是从共享 `credentialFile` 升级到控制器身份（`controllers`），不要直接启动，按 [docs/controller-identity.md](docs/controller-identity.md) 的升级/回滚章节执行：排空整机 → 停止 → 备份旧包、配置、数据库（含 WAL/SHM 和 events）、客户端配置和令牌材料（保留 live 控制器令牌文件与恢复所需备份）→ 安装新包 → 把 identity 片段合并进完整宿主配置（overlap）→ 第一次重启 → 可丢弃的身份/委派双向冒烟 → 在 final 完整配置中移除 `legacy` → 第二次重启并确认旧令牌返回 401。旧包读不了 `controllers`，所以新包必须在第一次重启前装好；旧的顶层认证字段会被拒绝挂载。
+从共享 `credentialFile` 升级到控制器身份（`controllers`）时，按 [docs/controller-identity.md](docs/controller-identity.md) 执行：停止新任务 → 排空整机 → 停止并备份旧包、配置、数据库及令牌材料 → 安装新包并以保留 `legacy` 的完整 overlap 配置重启 → 切换客户端 → 两个真实根及双向 delegate 冒烟 → 再次排空 → 移除 `legacy` 并重启 → 确认旧令牌返回 401、新身份正确 → 恢复接单。客户端切换须等兼容宿主就绪；整个窗口持续停止普通任务提交。
 
 宿主配置示例（字段见下方，路径用你自己的；完整校验规则见 [docs/controller-identity.md](docs/controller-identity.md)）：
 
@@ -143,7 +143,7 @@ node scripts/install.mjs --source <本仓库目录> --profile <DSH_HOME>/profile
 - `ownerId` 是持久化身份：沿用已有安装的值，否则旧任务认领不到。缺省值是 `codex-bridge-v1`。
 - `controllers` 是必填数组（1–32 项）。每个控制器有自己的 bearer 令牌文件；`id` 匹配 `^[a-z][a-z0-9-]{0,63}$` 且唯一，`tokenFile` 是绝对本地路径，文件内容去掉外围空白后必须是 24–512 个可打印 ASCII 字符且内部无空白（新令牌用 `randomBytes(32)` 生成 64 位十六进制）。重复令牌或弱令牌会拒绝启动；`admin: true` 只给真正需要越权审计的 `operator`。配置里只保存路径，不保存令牌。
 - `identityMigrationBackupDirectory`：已有旧任务库（`user_version=0`，且必须是已发布的 v0 表结构：`tasks(id,owner,idem,hash,body,UNIQUE(owner,idem))`，无 `submittedBy`）迁移到控制器身份前必需；宿主会先做一致性快照再迁移。`user_version=1` 必须匹配已发布的 v1 表结构（含 `submittedBy` 和 `UNIQUE(owner,submittedBy,idem)`）；版本与表结构不匹配（例如 `user_version=0` 却已是 v1 表形）会被 `STORE_SCHEMA_UNSUPPORTED` 拒绝，不猜测修复。全新的空库（`user_version=0` 且没有任何 schema 对象）直接建 v1。旧的顶层 `token` / `credentialFile` / `tokenEnv` 认证字段会被拒绝，必须迁移到 `controllers`。
-- 客户端各用自己那份令牌文件：Claude 根从启动环境的 `DSH_MCP_TOKEN` 发送；Codex 根用 `DSH_BRIDGE_CREDENTIAL_FILE` 指向自己的文件，由 stdio 载体读取。部署工具会生成缺失的令牌文件并加载对应客户端的令牌，已存在的文件只校验、不覆盖：
+- 客户端各用自己那份令牌文件，两个 MCP 入口都通过 `DSH_BRIDGE_CREDENTIAL_FILE` 指向它。部署工具生成缺失的令牌文件，配置仅保存路径，已存在的文件只校验、不覆盖：
 
   ```bash
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > <私有目录>/credentials/<controller-id>.token
@@ -164,39 +164,51 @@ claude plugin configure agent-bridge@agent-bridge
 市场名和插件名都来自 `.claude-plugin/marketplace.json`（`agent-bridge` / `agent-bridge`）。`configure` 不带参数时只显示选项和哪些还没设；要写入，就把一个 JSON 对象从标准输入传给 `--values-stdin`，没写到的选项保持原值：
 
 ```bash
-echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/agent-peer-claude-code.json"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
+echo '{"node_path":"C:/Program Files/nodejs/node.exe","peer_config":"<路径>/agent-peer-claude-code.json","bridge_credential_file":"<私有目录>/credentials/claude-code.token"}' | claude plugin configure agent-bridge@agent-bridge --values-stdin
 ```
 
-三个选项：
+四个选项：
 
 - `node_path`：Node 24 的 `node.exe` 绝对路径（默认值是字面量 `node`）。
 - `peer_config`：agent-peer 配置文件的绝对路径（见第 5 小节）。
 - `dsh_bridge_url`：默认 `http://127.0.0.1:3080/mcp/codex-bridge-v1`。
+- `bridge_credential_file`：必填，单个文件路径，指向 Claude 根自己的令牌文件；两个 MCP server 都会使用它。
 
 然后**完全退出并重开 Claude 桌面版**。
 
 **踩坑**：如果 MCP server 起不来，报 `'node' is not recognized` 或 `CONNECTION_CLOSED`，那是 Claude 桌面版用默认的字面量 `node` 去启动 `agent_peer` 了——桌面版的 PATH 里通常没有 node。也可能是它还在跑插件缓存里的旧副本。不要手改缓存，直接用第 3 小节的部署脚本：它把本机路径写进**部署副本**的插件默认值里，并刷新 Claude Code 的插件缓存。
 
-### 3. 一条命令本地部署（Claude Code + Codex）
+### 3. 本地部署与客户端切换（Claude Code + Codex）
 
 适合没有 git 历史的解压包，也适合已经手工配置过的机器。克隆或下载本仓库后：
 
 1. 复制 `scripts/deploy.example.json` 到仓库外，改成本机路径。必填三项：`deployRoot`（部署根，下面会有 `plugin/`、`config/`、`state/` 和 Claude 的本地插件市场）、`nodePath`、`bridgeUrl`。可选：`repo`（导出这个 git 仓库的 HEAD，缺省则直接复制包目录）、`gitExecutable`、`peerConfig`、`identity`（`credentialDirectory`、`migrationBackupDirectory`、可选 `legacyTokenFile`；启用 identity 时旧的共享 `credentialFile` 配置会被拒绝；它生成的是要合并进完整宿主配置的 `controllers` + `identityMigrationBackupDirectory` 片段，并为两个根分别生成自己的 peer 配置）、`codexPluginDir`、`codexExecutable`、`codexPluginId`、`codexMarketplace`、`claudeExecutable`、`claudePluginId`。可执行文件路径可以用整段的 `*`，脚本取最新匹配的那份（两个桌面端都把 CLI 放在随更新变化的版本/哈希目录里）。
-2. 先看计划，再执行：
+2. 身份迁移先生成隔离的准备包：
 
 ```bash
-node scripts/deploy-local.mjs --config <你的 deploy.json> --dry-run
-node scripts/deploy-local.mjs --config <你的 deploy.json>
+node scripts/deploy-local.mjs --config <你的 deploy.json> --prepare-only --dry-run
+node scripts/deploy-local.mjs --config <你的 deploy.json> --prepare-only
 ```
 
-非身份模式下，它只在这几个机器相关文件缺失时创建：Claude 的本地插件市场（`<deployRoot>/.claude-plugin/marketplace.json`）、`config/agent-peer.json`、Codex 插件的 `.mcp.json` 和 Codex 的 personal 市场条目。启用 `identity` 后，它另外生成身份产物：缺失的控制器令牌文件用 `randomBytes(32)` 生成，已存在的有效令牌文件原样保留；每个根一份 `config/agent-peer-claude-code.json` / `config/agent-peer-codex.json`（与 `peerConfig` 同目录，共用 `stateDir`、各自 `bridge.credentialFile`），已存在的配置会校验 `stateDir` 和该根自己的 `credentialFile`，不一致就拒绝而不是改写；overlap/final 宿主身份片段每次应用都重写；Codex 的 `.mcp.json` 内容不同时用 `.codex-mcp.json` 的两个 A3 stdio 入口（`dsh_project`、`agent_peer`）覆盖同名条目，内容相同时只校验，并保留用户的其他 MCP server。它还会把本机路径写进部署副本的插件默认值、同步 Codex 插件的 skills 与清单，并（配置了 `claudeExecutable` 时）刷新 Claude Code 的插件缓存；`--dry-run` 不写文件、不生成令牌。
+`--prepare-only` 创建独立的 `<deployRoot>/plugin.prepared-*`，返回供切换使用的目录，并生成身份产物：缺失的 token 文件、各根 peer 配置、overlap/final 宿主片段及可选启动器。已存在的有效 token 保留原样；各根 peer 配置共用 `stateDir`、引用各自文件，已有配置不匹配会拒绝。准备阶段保留现有 `plugin/`、`plugin.prev/`、市场、客户端缓存与配置，不启动应用 CLI。`--dry-run` 不写文件、不生成 token。
 
-3. **完全退出并重开 Claude 桌面版**，Codex 开一个新会话。
+普通本地安装仍可省略 `--prepare-only` 执行完整部署；完整部署会同步 Codex 配置并按配置刷新 Claude 插件缓存。现有客户端的 R8 迁移使用本节准备包和切换脚本，以便先备份实际安装内容。
+
+3. 在 overlap 宿主就绪后切换客户端。先保存工作，完全退出 Claude、Codex 及其 MCP 子进程，再执行：
+
+```bash
+node scripts/switch-controller-clients.mjs --config <你的 deploy.json> --prepared-plugin <返回的准备包目录>
+node scripts/switch-controller-clients.mjs --config <你的 deploy.json> --prepared-plugin <返回的准备包目录> --apply
+```
+
+首条默认 dry-run，可显式加 `--dry-run`。脚本定位实际安装配置，检测到 Machine 级 `DSH_MCP_TOKEN` 或残留进程会停止；它将文件和旧 User 变量状态备份到仅当前用户可读的 `F:/temp/agent-bridge-upstream/deploy-p0b/client-backups/<时间戳>`，更新实际缓存里的运行文件、技能和配置，保留无关设置，清除 User 与自身进程的共享 token。Claude 安装记录同步版本，已有缓存目录名保持原值。重跑跳过相同内容并保留首次备份。回滚预览用 `node scripts/switch-controller-clients.mjs --rollback <备份目录>`，实际恢复再加 `--apply`；客户端回滚不恢复数据库。
+
+4. 从开始菜单等普通入口重启两个应用，完成必要的插件启用，验证各自 `bridge_capabilities.controllerIdentity.self` 和 `admin:false`，再做双向委派冒烟。可选启动包装器位于返回的准备包目录 `config/launch-*.mjs`，仅设置文件路径；原有 live 包装器保留原样，CLI 包装启动请使用准备包里的新路径。详见[切换步骤与变更清单](docs/controller-identity.md#4-switch-the-windows-clients)。
 
 ### 4. 手工安装 Codex（不使用第 3 小节时）
 
 1. 把本仓库的 `skills/`、`.codex-plugin/`、`.codex-mcp.json`、`bin/`、`src/` 等放进插件目录 `~/.agents/plugins/plugins/agent-bridge`。仓库里的模板 `.codex-plugin/plugin.json` 指向 `./.codex-mcp.json`，装成机器插件时把它的 `mcpServers` 改成 `./.mcp.json`（部署脚本就是这么改的）。
-2. 在插件目录里放一份机器专用的 `.mcp.json`，内容以 `.codex-mcp.json` 为基础。该模板有两个 stdio 入口，两个都要手工改成绝对路径：`dsh_project` 的 `command` 设为 node 的绝对路径、`args` 指向插件目录里 `bin/bridge.mjs` 的绝对路径；`agent_peer` 的 `command` 同样设为 node 的绝对路径、`args` 指向插件目录里 `bin/peer-mcp.mjs` 的绝对路径，并把 `AGENT_PEER_CONFIG` 改成**Codex 自己**的 peer 配置文件绝对路径。模板里的 `default_tools_approval_mode: "approve"` 是 `codex exec` 里调用 MCP 工具所必需的，别删。
+2. 在插件目录里放一份机器专用的 `.mcp.json`，内容以 `.codex-mcp.json` 为基础。该模板有两个 stdio 入口，两个都要手工改成绝对路径：`dsh_project` 的 `command` 设为 node 的绝对路径、`args` 指向插件目录里 `bin/bridge.mjs` 的绝对路径；`agent_peer` 的 `command` 同样设为 node 的绝对路径、`args` 指向插件目录里 `bin/peer-mcp.mjs` 的绝对路径，并把 `AGENT_PEER_CONFIG` 改成**Codex 自己**的 peer 配置文件绝对路径。两个入口的 `env` 都设置 `DSH_BRIDGE_CREDENTIAL_FILE` 为 Codex 文件路径，并设置相同的 `DSH_BRIDGE_URL`；保留 `env_vars` 中 delegate token 与链路变量的转发。模板里的 `default_tools_approval_mode: "approve"` 是 `codex exec` 里调用 MCP 工具所必需的，别删。
 3. 在 `~/.agents/plugins/marketplace.json` 里加一条市场条目，`path` 用相对用户主目录的路径。
 4. 安装插件：
 
@@ -252,7 +264,7 @@ codex plugin add agent-bridge@personal
 - `peers.<target>.efforts`：可选，替换该目标的允许思考强度列表（1 到 16 个唯一字符串，每个匹配 `^[a-z][a-z0-9_-]{0,31}$`）。不写时用内置列表：codex `minimal, low, medium, high, xhigh, max, ultra`，claude-code `low, medium, high, xhigh, max`。列表外的单次值被拒为 `PEER_ARGS_INVALID`（字段 `reasoningEffort`），列表外的配置默认值被拒为 `PEER_CONFIG_INVALID`。
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`：`delegate` 模式的权限模式与允许的工具；`review` / `consult` 走只读工具集与 `--no-session-persistence`。
 - `records`：记录目录名、接受后的保留天数、失败/争议的保留天数、清扫间隔、Claude 会话目录。
-- `bridge`：清扫器使用的 DSH 端点；令牌优先取 `DSH_MCP_TOKEN`，没有时用该根自己的 `credentialFile`（每份 peer 配置各指向自己的控制器令牌文件）。
+- `bridge`：清扫器使用的 DSH 端点。根通过 `DSH_BRIDGE_CREDENTIAL_FILE` 或自己的 `credentialFile` 读文件；delegate 继续优先使用显式注入的 `DSH_MCP_TOKEN`。
 - `limits`：超时、并发等上限。
 
 配置里没有自由形状的参数列表：每个 CLI flag 都由校验过的字段生成，所以配置无法重新打开只读沙箱。

@@ -338,8 +338,8 @@ Two ASCII request headers carry submission provenance:
 - **Root controllers send no via headers (contract R1).** The root's tasks have
   `via: null`. Only a delegate sends them: the stdio carrier derives them from
   `AGENT_BRIDGE_CHAIN` / `AGENT_BRIDGE_ROOT_TASK`, and the peer bridge client derives
-  them from the recovered peer lineage. The Claude plugin manifest does not add chain
-  request headers; only credential-related settings changed.
+  them from the recovered peer lineage. Neither root MCP configuration sets chain or
+  root-task variables.
 - `via` is stored on the **first** submission and is never overwritten by a later
   `bridge_submit` replay. An override event records the current call's `via`, which can
   differ from the task's original `via`.
@@ -461,6 +461,20 @@ never contain `submittedBy`/`via`; the migration adds them as `null`.
   using the temporary `legacy` administrator during the maintenance window.
 
 ## Delegation and credential handling
+
+### Root file credentials (R8)
+
+Both roots use the stdio carrier `bin/bridge.mjs`. Claude's required file-type
+`bridge_credential_file` option supplies `DSH_BRIDGE_CREDENTIAL_FILE` to the carrier
+and `agent_peer`. Both Codex MCP entries carry Codex's own file path. Each root's
+peer configuration points at the same root-specific file and bridge URL. Tokens must
+stay out of persistent environment variables; remove the old User and root Process
+`DSH_MCP_TOKEN` during client switching.
+
+The resolver still gives an environment token priority because the peer server
+explicitly injects the calling root's verified token into a delegate. A delegate can
+therefore use its caller's identity even when its local root configuration names
+another credential file. Root file configuration does not change R1, R2 or R5.
 
 ### Credential precedence
 
@@ -616,16 +630,17 @@ upgrade artifacts for this machine still belong under `F:/temp/agent-bridge-upst
 outside git worktrees. Use fake tokens in any rehearsal; never read or copy the machine's
 real credential files into a test, log or document.
 
-### 1. Before stopping: prepare and drain
+### 1. Stop new submissions, prepare and drain
 
-1. Finish or cancel every task from every controller; collect results, acknowledge,
+1. Pause ordinary submissions for the entire maintenance window. Finish or cancel every task from every controller; collect results, acknowledge,
    and confirm the host-reported stop (`stopConfirmed:true`, `activeJobs:0`,
    `activeChildren:0`). A restart while work is active recovers it as unknown/not
    replayed, so do not start the upgrade with live tasks.
 2. Decide the temporary backup root, e.g.
    `F:/temp/agent-bridge-upstream/backups`, and make sure it is writable and outside
    the DSH data directory and any git worktree.
-3. Have the deployment tooling prepare the identity inputs: one token file per
+3. Run `deploy-local` with `--prepare-only` to create an isolated prepared package and
+   the identity inputs: one token file per
    controller (create if missing with `randomBytes(32)`, validate and keep valid
    existing bytes), the `controllers` list, `identityMigrationBackupDirectory`, and both
    an **overlap** host configuration (includes the temporary `legacy` administrator) and
@@ -635,6 +650,16 @@ real credential files into a test, log or document.
    `identityMigrationBackupDirectory`) to **merge into the complete host config** that
    keeps `dataDirectory`, `ownerId` and every other host field; the overlap and final
    configs are each complete.
+
+   ```text
+   node scripts/deploy-local.mjs --config <deploy.json> --prepare-only --dry-run
+   node scripts/deploy-local.mjs --config <deploy.json> --prepare-only
+   ```
+
+   Keep the returned `<deployRoot>/plugin.prepared-*` directory for the switch. This
+   stage preserves existing `plugin/`, `plugin.prev/`, marketplaces, installed caches
+   and app configuration, and does not launch either app CLI. It prevents a client
+   refresh from replacing the installed files before the switch can back them up.
 
    **An old install upgrading from the shared `credentialFile` must set
    `identity.legacyTokenFile` explicitly.** Unlike the per-root controller token files,
@@ -664,45 +689,19 @@ real credential files into a test, log or document.
    the next deploy refuse. In identity mode the deploy additionally writes these
    identity artifacts: a per-root peer config is created only when absent (an existing
    one is validated for the shared `stateDir` and its own `bridge.credentialFile`, and a
-   stale mismatch is refused rather than rewritten); the overlap and final host identity
-   fragments are regenerated on every apply; and an existing Codex `.mcp.json` is
-   migrated to the two A3 stdio entries from `.codex-mcp.json` (`dsh_project` through
-   `bin/bridge.mjs`, and `agent_peer`) while unrelated MCP servers are preserved. A dry
-   run writes nothing and generates no token.
-4. Refresh the client side so each root uses its **own** controls, not a shared one:
-   - Claude Code uses its own controller token for the `dsh_project` HTTP entry, loaded
-     into the Claude **root launch environment** as `DSH_MCP_TOKEN`;
-   - Codex's root clears the shared environment token and uses its own credential file
-     through the stdio carrier, with its own `AGENT_PEER_CONFIG`;
-   - each root gets its **own separate** agent-peer config, `agent-peer-claude-code.json`
-     and `agent-peer-codex.json`, in the configured peer-config directory (default
-     `<deployRoot>/config`). Both share the same `stateDir`, but each
-     `bridge.credentialFile` points at that root's own token file. The deploy tooling
-     derives each missing per-root config from a legacy single shared file; an existing
-     per-root config is validated and kept;
-   - the operator command uses its own file.
-   Point each client at the overlap configuration for the maintenance window.
-
-   Identity deployments also generate one launch wrapper per root under
-   `<deployRoot>/config`:
-
-   - `launch-claude-code.mjs` and `launch-codex.mjs` are plain Node scripts. Each one
-     removes inherited bridge credential variables and `AGENT_BRIDGE_CHAIN` /
-     `AGENT_BRIDGE_ROOT_TASK`, sets `AGENT_PEER_CONFIG` and `DSH_BRIDGE_URL`, then starts
-     the configured root CLI with **all of its own argv forwarded unchanged**. Run them
-     as `node <deployRoot>/config/launch-claude-code.mjs [claude arguments...]` and
-     `node <deployRoot>/config/launch-codex.mjs [codex arguments...]`; they accept no
-     flags of their own. The Claude wrapper reads its token file and exports
-     `DSH_MCP_TOKEN`; the Codex wrapper exports `DSH_BRIDGE_CREDENTIAL_FILE` instead.
-     Neither wrapper embeds a token.
-
-   The wrappers are a convenience, not the only way. Starting the root CLI yourself with
-   the same environment works too: for the Claude root's HTTP entry set `DSH_MCP_TOKEN`
-   before launch; for Codex set `DSH_BRIDGE_CREDENTIAL_FILE`, `DSH_BRIDGE_URL` and
-   `AGENT_PEER_CONFIG`, and remove inherited `DSH_MCP_TOKEN` / chain variables. The
-   shared resolver (`src/bridge-credentials.mjs`) checks `DSH_MCP_TOKEN` first and then
-   `DSH_BRIDGE_CREDENTIAL_FILE`; a delegated process refuses a missing environment token
-   instead of falling back to a local file.
+   stale mismatch is refused). Prepare-only creates missing overlap/final host identity
+   fragments and keeps existing ones. Review those existing artifacts
+   against the current deploy config before installing the host. A dry run writes
+   nothing and generates no token.
+   Its optional path-only launchers are available under
+   `<prepared-directory>/config/launch-claude-code.mjs` and `launch-codex.mjs`
+   (`preparedLauncherFiles` in the result); existing live launchers retain their bytes.
+   The client switch updates the actual installed MCP files after its backup.
+4. Apply the client switch only after the upgraded overlap host is ready (step 4).
+   Each root gets a separate
+   `agent-peer-claude-code.json` / `agent-peer-codex.json` in the peer-config directory
+   (default `<deployRoot>/config`), with one shared `stateDir` and its own
+   `bridge.credentialFile`. The operator retains its dedicated file outside app config.
 
 ### 2. Stop and back up
 
@@ -729,15 +728,105 @@ real credential files into a test, log or document.
    `identityMigrationBackupDirectory` first. If the mount fails with
    `STORE_BACKUP_FAILED` or `STORE_MIGRATION_FAILED`, stop: the host did not start, the
    backup is retained, and restoring the old configuration is still safe.
-2. Verify `bridge_capabilities`: `controllerIdentity.enabled === true`, the correct
-   `self`/`admin` for each client, and the expected `controllers` list. Confirm
+2. Preflight `bridge_capabilities`: `controllerIdentity.enabled === true` and the
+   expected `controllers` list. Confirm
    historical tasks are still readable (`bridge_list` with `submittedBy: null`) and
    that an existing task's `submittedBy`/`via` are what the old data should show.
 3. **Maintenance window rule:** `legacy` is an administrator for migration and repair
    only. Any mutation of a foreign or historical task during this window uses an
    explicit `override: {reason}` — including history (`submittedBy: null`). Record the
    reason in the operation/audit trail; do not use the legacy token for normal work.
-4. **Dual-direction disposable-task smoke**:
+   A direct HTTP check with a credential file only verifies host readiness. Real app
+   identities are checked after the client switch.
+
+### 4. Switch the Windows clients
+
+Use the same identity-enabled deploy JSON and the prepared directory returned in
+step 1. The switch script defaults to dry-run:
+
+```text
+node scripts/switch-controller-clients.mjs --config <deploy.json> --prepared-plugin <prepared-directory>
+node scripts/switch-controller-clients.mjs --config <deploy.json> --prepared-plugin <prepared-directory> --dry-run
+node scripts/switch-controller-clients.mjs --config <deploy.json> --prepared-plugin <prepared-directory> --apply
+```
+
+`--prepared-plugin` selects the staged source package. If the package is already
+prepared at `<deployRoot>/plugin`, omit that flag to use the default source. Keep the
+source directory available for the configured MCP entry points.
+
+Save work and fully exit both desktop apps and their MCP children before running the
+preflight. The script refuses a Machine-level `DSH_MCP_TOKEN` and any residual client
+or MCP process. A Machine-level variable requires separate operator removal before
+retrying; the script never changes Machine environment state. Existing terminals and
+other launchers that inherited the old variable must also be restarted.
+
+The script locates Claude's active user installation from
+`~/.claude/plugins/installed_plugins.json`, its saved options in `~/.claude/settings.json`
+under `pluginConfigs[pluginId].options`, and Codex's enabled plugin in
+`~/.codex/config.toml` and installed cache under `~/.codex/plugins/cache`. Both plugins
+must already be enabled; if needed, enable them in the apps and quit again. It copies
+the prepared runtime and skills into the selected installed directories under backup,
+updates their manifests and Claude's recorded version, and retains the existing
+`installPath` and cache directory names. The optional
+`--claude-home <dir>` and `--codex-home <dir>` select other configuration roots.
+If multiple Codex cache versions exist, pass
+`--codex-cache-dir <verified-installed-version-directory>` inside that plugin's cache.
+Ambiguous Claude installations must be resolved in its installation inventory first.
+The script never selects a version by recency. Review the dry-run's resolved paths.
+
+The default backup directory is
+`F:/temp/agent-bridge-upstream/deploy-p0b/client-backups/<timestamp>`. Before changing
+anything, the script restricts backup access to the current user and saves affected
+files plus whether User `DSH_MCP_TOKEN` existed and its value. Treat these backups as
+secret material. Logs and output never include token values. Repeated runs keep the
+first backup, skip unchanged configuration, and accept an already-absent variable.
+Use `--backup-root <absolute-directory>` to select another backup parent.
+
+The mutation inventory is:
+
+| Target | Change |
+|---|---|
+| Claude active cached `.claude-plugin/plugin.json` | Both stdio servers receive Claude's credential-file path and URL; machine defaults include the required file option |
+| Claude `plugins/installed_plugins.json` | Update this installation's version while retaining its `installPath` and unrelated entries |
+| Claude `settings.json` | Update this plugin's saved options; preserve unrelated settings |
+| Codex active cache and configured `codexPluginDir`: `.codex-plugin/plugin.json`, `.mcp.json`, and the previously loaded `.codex-mcp.json` when applicable | Update the loaded MCP file and `.mcp.json`, point each manifest to `.mcp.json`, and set both stdio entries' Codex credential-file path and URL; preserve unrelated MCP servers |
+| Installed Claude/Codex caches and configured Codex source: `bin/`, `src/`, `skills/`, `dsh-host/`, `package.json` | Copy the prepared package's runtime and skills under backup so the actual installed plugin runs the selected version |
+| `agent-peer-claude-code.json`, `agent-peer-codex.json` | Set each root's credential-file path and endpoint; preserve unrelated peer settings and shared state |
+| Windows User `DSH_MCP_TOKEN` and the switch process's variable | Remove; no token is written into another persistent variable |
+| Backup directory | Save restricted originals and restoration metadata |
+
+The script does not change the host, task database, controller token files or operator
+credential configuration. Codex's `config.toml` is read for discovery and backed up
+without being rewritten. A failed apply attempts
+to restore every attempted change; an incomplete restoration keeps the backup and
+reports that explicit rollback is needed. Preview an
+explicit rollback, then add `--apply` to restore:
+
+```text
+node scripts/switch-controller-clients.mjs --rollback <backup-directory>
+node scripts/switch-controller-clients.mjs --rollback <backup-directory> --apply
+```
+
+Client rollback restores the saved client files and variable state; it does not restore
+the database. Keep ordinary submissions paused while resolving a failed switch.
+
+Restart both apps from their ordinary entries, including the Start menu, and complete
+any required plugin-enable interaction. These save/exit/restart/enable actions require
+the user. Use the prepared package's optional `config/launch-claude-code.mjs` /
+`launch-codex.mjs` wrappers when launching a CLI through a wrapper. These wrappers
+clear inherited bridge credentials and chain variables, set `DSH_BRIDGE_CREDENTIAL_FILE`,
+`DSH_BRIDGE_URL` and `AGENT_PEER_CONFIG`, then forward all arguments to the configured
+CLI. Neither wrapper reads a token file or exports a token; ordinary desktop launch
+must work with the saved configuration. Older live wrappers preserved during preparation
+may still contain the former token-export logic; use the returned prepared launcher paths.
+
+Through **each real application**, call `bridge_capabilities`: Claude must report
+`controllerIdentity.self: "claude-code"`, Codex `"codex"`, and both `admin:false`.
+Check that Claude expands the file-type saved option in this desktop version and that
+Codex loads the selected cached configuration. Keep `legacy` until these checks and
+the following smoke pass.
+
+**Dual-direction disposable-task smoke**:
    - submit one cheap read-only task from each root controller and check
      `submittedBy` equals that controller and `via` is `null` for the root;
    - run one disposable delegate in each direction (Claude → Codex and Codex →
@@ -754,9 +843,9 @@ real credential files into a test, log or document.
      spawn (`PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN`);
    - collect, archive/clean up or discard the disposable tasks deliberately.
 
-### 4. Second restart (final)
+### 5. Drain again and restart with the final configuration
 
-1. Remove the `legacy` controller entry and its token file (or otherwise make the
+1. Collect the smoke results and confirm the entire host is drained again. Remove the `legacy` controller entry and its token file (or otherwise make the
    token unreadable) and start again with the **final** configuration. At the same time
    remove the `legacyTokenFile` field from the deploy config: a configured field whose
    file is missing is refused, so the field and the file are removed together. No
@@ -777,6 +866,7 @@ real credential files into a test, log or document.
    token is no longer valid. Update the sidecar configuration and restart the sidecar
    process so it reads the new credential. Do the same whenever a controller token file
    used by the sidecar is rotated or removed.
+6. Resume ordinary submissions after these checks pass.
 
 ### Rollback
 
