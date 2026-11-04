@@ -242,20 +242,26 @@ After the call it appends `task/override-result`, linked by `operationId`:
 {
   "type": "task/override-result",
   "operationId": "<uuid>",
+  "tool": "bridge_cancel",
   "outcome": "returned",
   "attemptId": "<attempt after the call>",
-  "accepted": false,
-  "replay": true,
-  "code": "project/budget-exhausted"
+  "accepted": true
 }
 ```
 
 `outcome` is `returned` or `threw`. `returned` only means the call returned — an
-archive that reports `archived:false`, for example, is still `returned`. Applicable
-boolean fields (`accepted`, `merged`, `archived`, `cleaned`, `eligible`, `replay`) are
-copied from the operation result, and a returned or thrown code is recorded when one
-exists. Pause/resume read those booleans from their operation outcome, not from task
-acceptance.
+archive that reports `archived:false`, for example, is still `returned`. The recorded fields come from **this operation's own outcome**, chosen per tool:
+
+- `bridge_cancel`, `bridge_pause`, `bridge_resume` read their nested result (`cancel`,
+  `pause`, `resume`); every cancel branch — settled, project, queued, never dispatched,
+  dispatched — returns the same `cancel` shape.
+- `bridge_clarify` and `bridge_followup` record only `replay`.
+- `bridge_approve`, `bridge_reconcile`, `bridge_clarify` and `bridge_followup` never copy
+  the task-level `accepted` flag (that flag means "result accepted", not this call).
+- `bridge_acknowledge` and `bridge_workspace_integrate` keep their business `accepted`;
+  archive, cleanup and integrate keep `archived`, `cleaned`, `eligible`, `merged`.
+- `code` is taken only from the operation result or the thrown error, never from a
+  historical task error, so a successful replay does not carry an old error code.
 
 Failure semantics:
 

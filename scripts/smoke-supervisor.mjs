@@ -344,7 +344,7 @@ async function main() {
     };
 
     /* ---------------------------------------------------------- capabilities */
-    await check('capabilities advertise the enabled long-task supervisor and keep the legacy 16-tool surface', async () => {
+    await check('capabilities advertise the enabled long-task supervisor and the discoverable packet.project entrypoint', async () => {
       const caps = await call('bridge_capabilities');
       assert.equal(caps.supervisorProjects.enabled, true);
       assert.equal(caps.supervisorProjects.firstEdition.singleRound, true);
