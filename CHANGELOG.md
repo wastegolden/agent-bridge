@@ -1,4 +1,11 @@
-# 1.8.0 — controller identity and `bridge_followup` (2026-11-04)
+# 2.0.0 — controller identity and `bridge_followup` (2026-11-04)
+
+## Breaking changes
+
+- The host no longer accepts the shared top-level `credentialFile` / `tokenEnv`: it mounts only with `controllers` (one credential per controller, optional `admin`). See `docs/controller-identity.md` for the upgrade window with a temporary `legacy` controller.
+- Mutating bridge tools now require the caller to own the task (or an administrator `override` with a reason); a controller can no longer change another controller's tasks.
+- The task store migrates from schema v0 to v1 on first start (backup required via `identityMigrationBackupDirectory`); rolling back to 1.x means restoring that pre-migration backup.
+- A Claude Code delegate loads only this plugin's two MCP servers (`--strict-mcp-config`).
 
 ## Controller identity (`p0b-v1`)
 
@@ -16,7 +23,7 @@
 
 ## Fixes from the adversarial review (2026-11-04)
 
-- Version unify: `package.json` and `.claude-plugin/plugin.json` are `1.8.0`; `.codex-plugin/plugin.json` is `1.8.0+codex.20261025.dsh020` (existing build suffix kept). The host's `bridge_capabilities.version` is aligned with the package at `1.8.0`, and both READMEs state that the host and plugin versions match.
+- Version unify: `package.json` and `.claude-plugin/plugin.json` are `2.0.0`; `.codex-plugin/plugin.json` is `2.0.0+codex.20261025.dsh020` (existing build suffix kept). The host's `bridge_capabilities.version` is aligned with the package at `2.0.0`, and both READMEs state that the host and plugin versions match.
 - The README install gate no longer reads the host `version` to decide whether to skip the replacement: it checks `controllerIdentity.enabled === true` together with `controllerIdentity.schemaVersion === 1`, and a version string alone is explicitly not evidence of identity support.
 - README manual Codex install covers both `.codex-mcp.json` stdio entries (`dsh_project` → `bin/bridge.mjs`, `agent_peer` → `bin/peer-mcp.mjs`) with absolute node and script paths plus `AGENT_PEER_CONFIG`.
 - Upgrade guide (`docs/controller-identity.md`): an old shared-`credentialFile` install must set `identity.legacyTokenFile` explicitly to an existing valid token file (never generated; the example is strict JSON without comments); the field and the file are removed after the final restart, and a configured field pointing at a missing file is refused. It also documents the generated `config/launch-claude-code.mjs` / `launch-codex.mjs` wrappers (no embedded token; all argv forwarded; Claude exports `DSH_MCP_TOKEN`, Codex exports `DSH_BRIDGE_CREDENTIAL_FILE`) and the equivalent manual environment setup.
@@ -24,10 +31,10 @@
 - R6: test temporary directories come only from `test/helpers/test-root.mjs` — an explicit absolute `BRIDGE_TEST_TMP` (each test gets and cleans its own subdirectory) or `os.tmpdir()` when unset; local acceptance sets `BRIDGE_TEST_TMP`/`TEMP`/`TMP` to `F:/temp/agent-bridge-upstream/test-tmp`, CI uses the runner temporary directory, and no code infers the base from drive existence.
 - Watchdog: the `docs/deadline-watchdog.md` example points `credentialFile` at a controller token (the read-only `bridge_check` allows any controller); after the final restart the sidecar configuration is repointed at a remaining controller token and the sidecar restarted.
 - R7 file ownership is recorded in `CONTRACTS.md`; the reference documentation keeps its four smoke-script instructions and the controller-identity configuration usable.
-- Cleanup ownership: closeout records its authenticated owner (`controllerIdentity.self`) and every DSH session's `submittedBy`, and the records index keeps both. A root's sweeper skips records owned by another root without writing anything or counting a failure, so two roots sharing one `stateDir` no longer exhaust each other's retries. An unavailable credential, bridge, Codex client or Claude project directory is reported but never written as a terminal `skipped`; exhausted entries can be retried explicitly with an audited event. Records without an owner and without DSH sessions (peer-only setups) are cleaned as before 1.8.0; DSH sessions in older records follow the dossier's `submittedBy`, and null ownership is left to the operator.
+- Cleanup ownership: closeout records its authenticated owner (`controllerIdentity.self`) and every DSH session's `submittedBy`, and the records index keeps both. A root's sweeper skips records owned by another root without writing anything or counting a failure, so two roots sharing one `stateDir` no longer exhaust each other's retries. An unavailable credential, bridge, Codex client or Claude project directory is reported but never written as a terminal `skipped`; exhausted entries can be retried explicitly with an audited event. Records without an owner and without DSH sessions (peer-only setups) are cleaned as before 2.0.0; DSH sessions in older records follow the dossier's `submittedBy`, and null ownership is left to the operator.
 - Override audit: each tool records its own operation outcome. Every `bridge_cancel` branch returns one `cancel` shape; clarify and follow-up record only `replay`; approve, reconcile, clarify and follow-up no longer copy the task's `accepted` flag; the error code comes only from the operation, so a successful replay no longer carries an old task error.
 - Deployment: a configured `identity.legacyTokenFile` that no longer exists is refused with a message naming the field to remove after the final switch; `stateDir` and credential paths compare case-insensitively on Windows; the operator client redacts the token from the result object before serialising it, so tokens containing quotes or backslashes are also redacted.
-- Tests and smoke scripts: controller tests take their directories from `test/helpers/test-root.mjs` (CI sets `BRIDGE_TEST_TMP` to the runner temp); the four offline smoke scripts configure `controllers`; `smoke-runtime` and `smoke-recurrent` expect 20 tools and the runtime smoke the 1.8.0 host version.
+- Tests and smoke scripts: controller tests take their directories from `test/helpers/test-root.mjs` (CI sets `BRIDGE_TEST_TMP` to the runner temp); the four offline smoke scripts configure `controllers`; `smoke-runtime` and `smoke-recurrent` expect 20 tools and the runtime smoke the 2.0.0 host version.
 
 ## `bridge_followup`: bounded follow-up rounds in an existing DSH session
 

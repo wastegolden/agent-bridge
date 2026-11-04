@@ -2,7 +2,7 @@
 
 # Agent Bridge
 
-Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to the other harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 1.8.0, MIT.
+Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to the other harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 2.0.0, MIT.
 
 > Independent project; not affiliated with, or endorsed by, DeepSeek, OpenAI or Anthropic.
 
@@ -42,7 +42,7 @@ The host bridge is a DSH plugin. It mounts the MCP endpoint `/mcp/codex-bridge-v
 - network access is declared by the packet too, and is available only when granted;
 - the lifecycle is review → integrate → acknowledge → archive / cleanup, and every step requires the previous step's real evidence.
 
-It exposes 20 `bridge_*` tools (6 read, 1 submit, 13 mutate; the host's `bridge_capabilities` reports `version` **1.8.0**, the same as the plugin version):
+It exposes 20 `bridge_*` tools (6 read, 1 submit, 13 mutate; the host's `bridge_capabilities` reports `version` **2.0.0**, the same as the plugin version):
 
 - tasks: `bridge_submit`, `bridge_check`, `bridge_result`, `bridge_dossier`
 - authorization: `bridge_approve`, `bridge_clarify`
@@ -95,7 +95,7 @@ For compatibility with existing installs the persisted ids are still the old one
 
 ### 1. DSH host bridge
 
-Check what you have first: call `bridge_capabilities` from a connected Claude / Codex. **Only** `controllerIdentity.enabled === true` together with `controllerIdentity.schemaVersion === 1` means the host already runs the controller-identity version, so you can skip this section; if either is missing (for example an older host without `controllerIdentity`, or a `schemaVersion` other than 1), replace the old install as below. Do not use the `version` field in place of those two checks; the current host and plugin should both report `1.8.0`, but a version string is not evidence of identity support.
+Check what you have first: call `bridge_capabilities` from a connected Claude / Codex. **Only** `controllerIdentity.enabled === true` together with `controllerIdentity.schemaVersion === 1` means the host already runs the controller-identity version, so you can skip this section; if either is missing (for example an older host without `controllerIdentity`, or a `schemaVersion` other than 1), replace the old install as below. Do not use the `version` field in place of those two checks; the current host and plugin should both report `2.0.0`, but a version string is not evidence of identity support.
 
 When replacing an older install:
 
@@ -259,7 +259,7 @@ There is deliberately no free-form argument list: every CLI flag is generated fr
 
 ## Verify
 
-1. Call `bridge_capabilities`: the host should report `version` `1.8.0` (the same as the plugin version). `controllerIdentity.self` / `admin` must match the controller token you are using, `controllers` lists the configured IDs, and `controllerIdentity.enabled` is `true` with `schemaVersion` `1`.
+1. Call `bridge_capabilities`: the host should report `version` `2.0.0` (the same as the plugin version). `controllerIdentity.self` / `admin` must match the controller token you are using, `controllers` lists the configured IDs, and `controllerIdentity.enabled` is `true` with `schemaVersion` `1`.
 2. Call `peer_capabilities`: `self` should be `claude-code` on the Claude side and `codex` on the Codex side; `chain` shows your position, and every peer/mode pair states whether it is allowed and, if not, with which error code.
 3. Run one disposable delegate in each direction. Claude → Codex: confirm the delegate inherited the root's (Claude's) non-administrator identity and `via` chain and can complete one cheap DSH submission; the Codex side keeps its own MCP configuration, so do not claim Codex excludes the user's other MCP servers. Codex → Claude: confirm the Claude Code delegate sees only the plugin's two MCP servers and that the user's other MCP servers are absent (the explicit narrowing since 1.7.0), and that it can still submit one cheap DSH task.
 
