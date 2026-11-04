@@ -535,27 +535,44 @@ lineage ledger; the job's `bridge` object carries only `state` and `reason`.
 ### Claude Code delegate: strict MCP configuration (explicit behaviour change)
 
 Only a **Claude Code delegate** — the target harness is Claude Code, which includes
-Codex → Claude — is started with `--strict-mcp-config --mcp-config <json>`, where the
-JSON contains **exactly the plugin's two MCP entries**:
+Codex → Claude — is started with `--strict-mcp-config --mcp-config <json>`. The peer
+server's invocation builder generates that JSON with **exactly the plugin's two stdio MCP
+entries and nothing else**:
 
 - `plugin_agent-bridge_dsh_project` → `bin/bridge.mjs` (the stdio carrier, so the child
   receives inherited credentials, disabled markers and via regardless of which harness
   is the delegate);
-- `plugin_agent-bridge_agent_peer` → `bin/peer-mcp.mjs` with
+- `plugin_agent-bridge_agent_peer` → `bin/peer-mcp.mjs` (stdio) with
   `AGENT_BRIDGE_SELF=claude-code`.
 
-`--strict-mcp-config` means the user's **other** MCP servers are deliberately excluded
-from that Claude Code delegate's session. This is an intentional behaviour change
-relative to 1.7.0, where a delegate could inherit the user's MCP configuration. It
-narrows what a sub-controller can reach through MCP; it does not widen anything.
+No HTTP entry and no user-configured server is included. `--strict-mcp-config` means the
+user's **other** MCP servers are deliberately excluded from that Claude Code delegate's
+session. This is an intentional behaviour change relative to 1.7.0, where a delegate
+could inherit the user's MCP configuration; it narrows what a sub-controller can reach
+through MCP and widens nothing.
+
+The narrowing is kept even when the bridge is **unavailable or disabled**. A delegate
+whose capability check cannot verify the bridge still runs under contract R2 with
+`DSH_BRIDGE_DISABLED=1` and no credential, and it is still started with the same strict
+two-entry configuration. There is no "bridge unavailable → non-strict" fallback: the
+disabled marker, inherited credential and `via` are honoured only by the carrier and the
+credential resolver (`src/bridge-credentials.mjs`), while an HTTP entry or a
+user-configured bridge entry does not understand them. Relaxing strict would let the
+disabled state leak through another MCP path and make the delegate's tool surface depend
+on bridge health.
+
+**Compatibility impact to state in an upgrade:** any Claude Code delegate workflow that
+relied on the user's other MCP servers loses those tools inside the delegate. Plan for
+that before upgrading; a sub-controller that needs an unrelated MCP server cannot get it
+through the strict delegate path.
 
 This restriction is **direction-specific and does not apply to a Codex delegate**. When
-Claude delegates to Codex (Claude → Codex), the child is Codex: it keeps the Codex MCP
+Claude delegates to Codex (Claude → Codex), the child is Codex: it keeps its own Codex MCP
 configuration with the forwarded credential/chain environment, and no two-entry
-`--strict-mcp-config` exclusion is claimed for it. A Claude → Codex smoke test verifies
-the inherited root identity and carrier (the task belongs to the root principal and its
-delegate `via` is recorded); it must not assert that Codex excludes the user's other MCP
-servers.
+`--strict-mcp-config` exclusion is claimed for it. That asymmetry is known and accepted
+under contract R5. A Claude → Codex smoke test verifies the inherited root identity and
+carrier (the task belongs to the root principal and its delegate `via` is recorded); it
+must not assert that Codex excludes the user's other MCP servers.
 
 Because the Claude Code narrowing changes a live client's tool surface, an upgrade
 requires a **dual-direction root smoke test**: after restart, run one disposable
@@ -581,10 +598,17 @@ shared by every controller. Plan it as an operator maintenance action, not as pa
 an ordinary coding task, and **drain the whole host**, not just one controller's
 sessions.
 
-Test and rehearsal directories, migration backups and disposable-task artifacts belong
-under `F:/temp/agent-bridge-upstream`, outside git worktrees. Use fake tokens in any
-rehearsal; never read or copy the machine's real credential files into a test, log or
-document.
+Test code obtains every temporary directory through `test/helpers/test-root.mjs` (contract
+R6). That helper uses an explicit `BRIDGE_TEST_TMP` as the only configurable base: it
+must be an absolute path, is created if missing, and each test gets its own unique
+subdirectory which it alone removes. When `BRIDGE_TEST_TMP` is unset the helper uses the
+platform temporary directory (`os.tmpdir()`); nothing infers the base from which drive
+letters or folders happen to exist. Local acceptance commands set `BRIDGE_TEST_TMP`,
+`TEMP` and `TMP` to `F:/temp/agent-bridge-upstream/test-tmp`; CI sets
+`BRIDGE_TEST_TMP` to the runner's temporary directory. Migration backups and disposable
+upgrade artifacts for this machine still belong under `F:/temp/agent-bridge-upstream`,
+outside git worktrees. Use fake tokens in any rehearsal; never read or copy the machine's
+real credential files into a test, log or document.
 
 ### 1. Before stopping: prepare and drain
 
@@ -600,11 +624,38 @@ document.
    existing bytes), the `controllers` list, `identityMigrationBackupDirectory`, and both
    an **overlap** host configuration (includes the temporary `legacy` administrator) and
    a **final** configuration (without `legacy`). The deploy config's `identity` block
-   carries `credentialDirectory`, `migrationBackupDirectory` and an optional
+   carries `credentialDirectory`, `migrationBackupDirectory` and the optional
    `legacyTokenFile`, and its output is an **identity fragment** (`controllers` +
    `identityMigrationBackupDirectory`) to **merge into the complete host config** that
    keeps `dataDirectory`, `ownerId` and every other host field; the overlap and final
-   configs are each complete. In identity mode the deploy additionally writes these
+   configs are each complete.
+
+   **An old install upgrading from the shared `credentialFile` must set
+   `identity.legacyTokenFile` explicitly.** Unlike the per-root controller token files,
+   the legacy token is never generated: point the field at an existing valid token file
+   (24–512 printable ASCII characters with no internal whitespace) that will become the
+   temporary `legacy` administrator in the overlap config. The deploy config is parsed as
+   strict JSON, so it must not contain comments; this is a complete, valid deploy config
+   example (replace the paths):
+
+   ```json
+   {
+     "deployRoot": "F:/temp/agent-bridge-upstream/deploy",
+     "nodePath": "C:/Program Files/nodejs/node.exe",
+     "bridgeUrl": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
+     "identity": {
+       "credentialDirectory": "F:/temp/agent-bridge-upstream/deploy/credentials",
+       "migrationBackupDirectory": "F:/temp/agent-bridge-upstream/backups",
+       "legacyTokenFile": "F:/temp/agent-bridge-upstream/deploy/credentials/legacy.token"
+     }
+   }
+   ```
+
+   If `identity.legacyTokenFile` is present but the file is missing, deployment refuses;
+   it never guesses a token or creates one for `legacy`. After the **final** restart,
+   remove both the `legacyTokenFile` field and the legacy token file (the final config no
+   longer lists `legacy`); leaving the field in place while deleting only the file makes
+   the next deploy refuse. In identity mode the deploy additionally writes these
    identity artifacts: a per-root peer config is created only when absent (an existing
    one is validated for the shared `stateDir` and its own `bridge.credentialFile`, and a
    stale mismatch is refused rather than rewritten); the overlap and final host identity
@@ -625,6 +676,27 @@ document.
      per-root config is validated and kept;
    - the operator command uses its own file.
    Point each client at the overlap configuration for the maintenance window.
+
+   Identity deployments also generate one launch wrapper per root under
+   `<deployRoot>/config`:
+
+   - `launch-claude-code.mjs` and `launch-codex.mjs` are plain Node scripts. Each one
+     removes inherited bridge credential variables and `AGENT_BRIDGE_CHAIN` /
+     `AGENT_BRIDGE_ROOT_TASK`, sets `AGENT_PEER_CONFIG` and `DSH_BRIDGE_URL`, then starts
+     the configured root CLI with **all of its own argv forwarded unchanged**. Run them
+     as `node <deployRoot>/config/launch-claude-code.mjs [claude arguments...]` and
+     `node <deployRoot>/config/launch-codex.mjs [codex arguments...]`; they accept no
+     flags of their own. The Claude wrapper reads its token file and exports
+     `DSH_MCP_TOKEN`; the Codex wrapper exports `DSH_BRIDGE_CREDENTIAL_FILE` instead.
+     Neither wrapper embeds a token.
+
+   The wrappers are a convenience, not the only way. Starting the root CLI yourself with
+   the same environment works too: for the Claude root's HTTP entry set `DSH_MCP_TOKEN`
+   before launch; for Codex set `DSH_BRIDGE_CREDENTIAL_FILE`, `DSH_BRIDGE_URL` and
+   `AGENT_PEER_CONFIG`, and remove inherited `DSH_MCP_TOKEN` / chain variables. The
+   shared resolver (`src/bridge-credentials.mjs`) checks `DSH_MCP_TOKEN` first and then
+   `DSH_BRIDGE_CREDENTIAL_FILE`; a delegated process refuses a missing environment token
+   instead of falling back to a local file.
 
 ### 2. Stop and back up
 
@@ -679,8 +751,10 @@ document.
 ### 4. Second restart (final)
 
 1. Remove the `legacy` controller entry and its token file (or otherwise make the
-   token unreadable) and start again with the **final** configuration. No migration
-   runs on an already-version-1 store.
+   token unreadable) and start again with the **final** configuration. At the same time
+   remove the `legacyTokenFile` field from the deploy config: a configured field whose
+   file is missing is refused, so the field and the file are removed together. No
+   migration runs on an already-version-1 store.
 2. Verify the old legacy token now gets **HTTP 401** `{"error":"unauthorized"}`.
 3. Verify the remaining controllers and clients still authenticate; historical tasks
    remain readable; mutating a historical task now requires a remaining administrator
@@ -689,6 +763,14 @@ document.
    need for rollback and audit. Delete only intended disposable test artifacts and,
    after the final restart, the temporary `legacy` token file; do not delete live
    controller token files or the needed backup snapshots.
+5. If the deadline watchdog sidecar is enabled, its separate
+   `DSH_BRIDGE_WATCHDOG_CONFIG` still names its own `credentialFile`. After the final
+   restart, point that field at a **live controller** token file — for example
+   `<credentialDirectory>/codex.token` — because the sidecar performs a read-only
+   `bridge_check` and any configured controller may use read tools; the removed `legacy`
+   token is no longer valid. Update the sidecar configuration and restart the sidecar
+   process so it reads the new credential. Do the same whenever a controller token file
+   used by the sidecar is rotated or removed.
 
 ### Rollback
 

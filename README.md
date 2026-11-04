@@ -2,7 +2,7 @@
 
 # Agent Bridge
 
-Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 1.7.0，MIT。
+Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 1.8.0，MIT。
 
 > 独立项目，与 DeepSeek、OpenAI、Anthropic 均无隶属或背书关系。
 
@@ -42,7 +42,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - 网络也由任务包声明，只有被授予时才可用；
 - 生命周期是 审查（review）→ 集成（integrate）→ 确认（acknowledge）→ 归档 / 清理（archive / cleanup），每一步都要求前一步的真实证据。
 
-它暴露 20 个 `bridge_*` 工具（6 读、1 提交、13 变更；宿主 `bridge_capabilities` 报告的 `version` 是 **1.5.0**，与插件版本 1.7.0 不同）：
+它暴露 20 个 `bridge_*` 工具（6 读、1 提交、13 变更；宿主 `bridge_capabilities` 报告的 `version` 是 **1.8.0**，与插件版本一致）：
 
 - 任务：`bridge_submit`、`bridge_check`、`bridge_result`、`bridge_dossier`
 - 授权：`bridge_approve`、`bridge_clarify`
@@ -95,7 +95,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 ### 1. DSH 宿主桥
 
-先看现状：在已连通的 Claude / Codex 里调用 `bridge_capabilities`，读返回的 `version`。1.6.x 的宿主代码与 1.5.0 相同，报告的也是 1.5.0；如果你已经在这个版本上，跳过本节。
+先看现状：在已连通的 Claude / Codex 里调用 `bridge_capabilities`。**只有**返回的 `controllerIdentity.enabled === true` 且 `controllerIdentity.schemaVersion === 1` 时，才说明宿主已经运行控制器身份版本，可以跳过本节；缺任一项（例如旧版没有 `controllerIdentity`，或 `schemaVersion` 不是 1）就按下面替换旧安装。不要用 `version` 字段代替这两项检查；当前宿主与插件都应报告 `1.8.0`，但版本字符串本身不是身份能力的证据。
 
 替换旧安装时：
 
@@ -196,7 +196,7 @@ node scripts/deploy-local.mjs --config <你的 deploy.json>
 ### 4. 手工安装 Codex（不使用第 3 小节时）
 
 1. 把本仓库的 `skills/`、`.codex-plugin/`、`.codex-mcp.json`、`bin/`、`src/` 等放进插件目录 `~/.agents/plugins/plugins/agent-bridge`。仓库里的模板 `.codex-plugin/plugin.json` 指向 `./.codex-mcp.json`，装成机器插件时把它的 `mcpServers` 改成 `./.mcp.json`（部署脚本就是这么改的）。
-2. 在插件目录里放一份机器专用的 `.mcp.json`，内容以 `.codex-mcp.json` 为基础，把 `agent_peer` 的 `command` 改成 node 的绝对路径、`args` 指向插件目录里 `bin/peer-mcp.mjs` 的绝对路径、`AGENT_PEER_CONFIG` 改成**Codex 自己**的 peer 配置文件绝对路径。模板里的 `default_tools_approval_mode: "approve"` 是 `codex exec` 里调用 MCP 工具所必需的，别删。
+2. 在插件目录里放一份机器专用的 `.mcp.json`，内容以 `.codex-mcp.json` 为基础。该模板有两个 stdio 入口，两个都要手工改成绝对路径：`dsh_project` 的 `command` 设为 node 的绝对路径、`args` 指向插件目录里 `bin/bridge.mjs` 的绝对路径；`agent_peer` 的 `command` 同样设为 node 的绝对路径、`args` 指向插件目录里 `bin/peer-mcp.mjs` 的绝对路径，并把 `AGENT_PEER_CONFIG` 改成**Codex 自己**的 peer 配置文件绝对路径。模板里的 `default_tools_approval_mode: "approve"` 是 `codex exec` 里调用 MCP 工具所必需的，别删。
 3. 在 `~/.agents/plugins/marketplace.json` 里加一条市场条目，`path` 用相对用户主目录的路径。
 4. 安装插件：
 
@@ -259,7 +259,7 @@ codex plugin add agent-bridge@personal
 
 ## 验证
 
-1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.5.0`（插件版本是 1.7.0，两者不同）。`controllerIdentity.self` / `admin` 应与你使用的控制器令牌一致，`controllers` 列出已配置的 ID。
+1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `1.8.0`（与插件版本一致）。`controllerIdentity.self` / `admin` 应与你使用的控制器令牌一致，`controllers` 列出已配置的 ID，`controllerIdentity.enabled` 为 `true` 且 `schemaVersion` 为 `1`。
 2. 调用 `peer_capabilities`：Claude 端 `self` 应是 `claude-code`，Codex 端应是 `codex`；`chain` 显示自己在链上的位置，每个 peer 的每个模式会明确告诉你是否允许，以及不允许时的错误码。
 3. 双向各跑一个可丢弃 delegate。Claude → Codex：确认 delegate 继承的是根（Claude）的非管理员身份和 `via` 链，并能完成一个便宜的 DSH 提交；Codex 一侧保留自己的 MCP 配置，不要断言“Codex 排除了用户的其他 MCP server”。Codex → Claude：确认 Claude Code delegate 只看到插件的两个 MCP server、用户其他 MCP server 不出现（这是 1.7.0 之后的明确收窄），且它仍能完成一个便宜的 DSH 提交。
 

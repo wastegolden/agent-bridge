@@ -75,7 +75,7 @@ node scripts/uninstall.mjs --profile <DSH-profile绝对目录> --dry-run --json
 node scripts/uninstall.mjs --profile <DSH-profile绝对目录> --json
 ```
 
-DSH 插件配置可设置 `dataDirectory`、`ownerId`、`endpoint`、`controllers`、`identityMigrationBackupDirectory`、`maxConcurrent`、`routeLimits`、`defaultModel`、`profiles`、`skills`、`retention`、`childSessions`、`commandProfiles`/`commandJobs`、`rootCallbackGrants` 与 `eventWake`。自 1.8.0 起认证改为按控制器配置：`controllers` 中每项给出 `id`、`tokenFile`（绝对路径）和可选的 `admin`，宿主按请求所带的凭据识别控制器；旧的顶层 `credentialFile`、`tokenEnv` 会被拒绝。已有 v0 任务库首次升级时必须配置 `identityMigrationBackupDirectory`。凭据至少 24 字符，不写入插件包。详见 `docs/controller-identity.md`。可把以上非密钥配置保存成 JSON 文件，并在安装命令中添加 `--host-config <配置文件绝对路径>`。
+DSH 插件配置可设置 `dataDirectory`、`ownerId`、`endpoint`、`controllers`、`identityMigrationBackupDirectory`、`maxConcurrent`、`routeLimits`、`defaultModel`、`profiles`、`skills`、`retention`、`childSessions`、`commandProfiles`/`commandJobs`、`rootCallbackGrants` 与 `eventWake`。自 1.8.0 起认证改为按控制器配置：`controllers` 中每项给出 `id`、`tokenFile`（绝对路径）和可选的 `admin`，宿主按请求所带的凭据识别控制器；旧的顶层 `token`、`credentialFile`、`tokenEnv` 会被拒绝。已有 v0 任务库首次升级时必须配置 `identityMigrationBackupDirectory`。凭据至少 24 字符，不写入插件包。详见 `docs/controller-identity.md`。可把以上非密钥配置保存成 JSON 文件，并在安装命令中添加 `--host-config <配置文件绝对路径>`。
 
 ## 受控自治：子会话、作业与事件唤醒（1.2.0）
 
@@ -126,7 +126,7 @@ node bin/wake-controller.mjs --config ... --reconcile <eventId> --delivered true
 
 锁不可自动回收：进程死亡后残留的 `state.lock`/`runner.lock` 必须由操作人执行离线恢复——停掉所有生产者与 runner、确认无存活持有者，再只删除该锁文件。宿主确认关停时才会关闭它拥有的 outbox；停止未确认时 outbox、store 与宿主租约一起保留，等待下次 close 重试。
 
-Codex 的 MCP 模板 `.codex-mcp.json` 通过 `node ./bin/bridge.mjs` 使用 stdio 连接（安装副本里叫 `.mcp.json`，也可以改成直接 `url` + `bearer_token_env_var`）。转发程序读取 `DSH_MCP_TOKEN`，或 `DSH_BRIDGE_CREDENTIAL_FILE` 指定的文件；默认文件为 `$DSH_HOME/codex-bridge-v1/bridge-token`（未设置 `DSH_HOME` 时使用用户主目录下 `.dsh`）。宿主和转发程序必须使用同一凭据。默认服务地址是 `http://127.0.0.1:3080/mcp/codex-bridge-v1`，可用 `DSH_BRIDGE_URL` 覆盖。自定义 DSH 安装目录时，在 Codex 安装副本的 `.mcp.json` 中设置 `env.DSH_HOME`；凭据文件保存在运行数据目录中。
+Codex 的 MCP 模板 `.codex-mcp.json` 通过 `node ./bin/bridge.mjs` 使用 stdio 连接（安装副本里叫 `.mcp.json`，也可以改成直接 `url` + `bearer_token_env_var`）。转发程序读取 `DSH_MCP_TOKEN`，或 `DSH_BRIDGE_CREDENTIAL_FILE` 指定的文件。自 1.8.0 起宿主按控制器令牌认证：Codex 根应把 `DSH_BRIDGE_CREDENTIAL_FILE` 指向**自己的**控制器令牌文件（例如 `<credentialDirectory>/codex.token`），不要再用旧的共享 `bridge-token`；宿主与转发程序必须使用同一个控制器的令牌。默认服务地址是 `http://127.0.0.1:3080/mcp/codex-bridge-v1`，可用 `DSH_BRIDGE_URL` 覆盖。自定义 DSH 安装目录时，在 Codex 安装副本的 `.mcp.json` 中设置 `env.DSH_HOME`；凭据文件保存在运行数据目录中。
 
 安装 Codex 插件后开启新对话加载工具和技能。DSH 必须保持运行；转发程序不会自行启动宿主。模型 API Key 仍通过 DSH 自身的设置界面配置，桥接凭据不能代替模型 API Key。
 
@@ -141,7 +141,10 @@ node --test test/*.test.mjs
 node scripts/smoke-runtime.mjs <包含node_modules的DSH安装目录>
 node scripts/smoke-autonomy.mjs <包含node_modules的DSH安装目录>
 node scripts/smoke-supervisor.mjs <包含node_modules的DSH安装目录>
+node scripts/smoke-recurrent.mjs <包含node_modules的DSH安装目录>
 ```
+
+`node --test` 的临时目录由 `test/helpers/test-root.mjs` 决定：显式设置绝对路径 `BRIDGE_TEST_TMP` 时每个测试在该目录下得到独占子目录并只清理自己的子目录，未设置时使用系统临时目录（`os.tmpdir()`）；本机验收同时把 `BRIDGE_TEST_TMP`、`TEMP`、`TMP` 设为 `F:/temp/agent-bridge-upstream/test-tmp`，CI 设为 runner 临时目录，代码不按盘符是否存在推断。四个冒烟脚本都接收同一个参数（包含 `node_modules/@deepseek-ai/dsh` 的安装目录），各自在临时目录下创建独立数据目录和自己的机器级 host config（`controllers` 与控制器令牌文件），不会读取或改写正式 profile、正式令牌或正式数据目录。
 
 测试包括真实临时 Git 仓库/worktree 操作、安装回滚与 junction 攻击、任务恢复/幂等/取消状态机，以及模拟宿主适配。`smoke-runtime.mjs` 在 DSH 安装目录下创建独立 `.bridge-smoke-*` 数据目录，使用空闲端口启动真实 DSH 和离线模型 fixture，验证会话、文件工具边界、取消、归档以及 Codex stdio 转发。退出时停止测试宿主，保留报告用于诊断；不调用付费模型 API，也不访问正式 profile。成功联调报告见 [evidence/dsh-0.1.7-rc.2.json](evidence/dsh-0.1.7-rc.2.json)。报告不能证明真实模型服务的联网认证或输出质量。
 

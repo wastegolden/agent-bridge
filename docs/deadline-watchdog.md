@@ -31,11 +31,19 @@ carrier behaves exactly as before and no watchdog code runs.
      "stateRoot": "F:/DSH/data/codex-bridge-v1/wake",
      "receiptRoot": "F:/DSH/data/codex-bridge-v1/watchdog-receipts",
      "endpoint": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
-     "credentialFile": "F:/DSH/data/codex-bridge-v1/bridge-token",
+     "credentialFile": "F:/DSH/data/codex-bridge-v1/credentials/codex.token",
      "graceMs": 2000,
      "checkTimeoutMs": 70000
    }
    ```
+
+   `credentialFile` must be a **live controller token file** — one of the per-controller
+   token files configured in the host's `controllers` list. The watchdog's check is a
+   read-only `bridge_check`, and read tools have no ownership restriction, so any
+   configured controller token works (the example uses the `codex` one). After the final
+   identity restart removes the temporary `legacy` controller, point this field at a
+   remaining controller's token file, update this config and restart the sidecar; a
+   removed or rotated token makes the check fail closed without an event.
 
    Only those nine keys are accepted. Every path must be absolute and local — UNC/remote
    paths (`\\server\share`, `//server/share`, `\\?\...`) are refused on every platform —
