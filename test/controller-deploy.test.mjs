@@ -1,7 +1,8 @@
 /**
  * D1 controller-deploy tests.
  *
- * Everything is disposable and lives under F:/temp/agent-bridge-upstream; only fake
+ * Everything is disposable and is created through test/helpers/test-root.mjs
+ * (BRIDGE_TEST_TMP when set, the platform temporary directory otherwise); only fake
  * tokens and fake CLIs are used. The repository's own plugin manifest and Codex MCP
  * template are copied into a package fixture so the generated artifacts are checked
  * against the real A3 schema without touching a machine deployment.
@@ -15,9 +16,11 @@ import process from 'node:process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { testDir } from './helpers/test-root.mjs';
 import {
   deploy,
   identityLayout,
+  samePath,
 } from '../scripts/deploy-local.mjs';
 import {
   MUTATION_TOOLS,
@@ -28,31 +31,8 @@ import { loadControllerRegistry } from '../src/controller-auth.mjs';
 import { normalizePeerConfig } from '../src/peer/config.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TEST_ROOT = 'F:/temp/agent-bridge-upstream/controller-deploy-tests';
 const FAKE_TOKEN = (label) => `${label}-`.padEnd(64, 'f').slice(0, 64);
 const slash = (value) => value.replaceAll('\\', '/');
-
-let counter = 0;
-
-// TEST_ROOT is written with forward slashes while path.join/path.resolve produce
-// backslashes on Windows, so compare resolved paths via path.relative instead of a
-// raw prefix startsWith (which also accepts a sibling such as ...-tests-evil).
-function isWithinTestRoot(directory) {
-  const relative = path.relative(path.resolve(TEST_ROOT), path.resolve(directory));
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-async function makeSandbox(t) {
-  counter += 1;
-  const directory = path.join(TEST_ROOT, `${process.pid}-${Date.now()}-${counter}`);
-  await fsp.mkdir(directory, { recursive: true });
-  t.after(async () => {
-    const resolved = path.resolve(directory);
-    assert.ok(isWithinTestRoot(directory), `refusing to clean outside the test root: ${resolved}`);
-    await fsp.rm(resolved, { recursive: true, force: true });
-  });
-  return directory;
-}
 
 async function exists(file) {
   return fsp.stat(file).then(() => true, () => false);
@@ -141,7 +121,7 @@ function capabilitiesResponse(admin = true) {
 }
 
 test('identity dry-run creates no token, config, launcher or deployment files', async (t) => {
-  const sandbox = await makeSandbox(t);
+  const sandbox = testDir(t, 'controller-deploy');
   const packageRoot = await makePackage(path.join(sandbox, 'package'));
   const config = makeConfig(sandbox);
   const { stdout } = await runDeploy(config, packageRoot, { dryRun: true });
@@ -164,8 +144,23 @@ test('identity dry-run creates no token, config, launcher or deployment files', 
   );
 });
 
+test('a missing legacy token file is refused with the final-cutover instruction', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const packageRoot = await makePackage(path.join(sandbox, 'package'));
+  const config = makeConfig(sandbox);
+  config.identity.legacyTokenFile = path.join(sandbox, 'missing-legacy.token');
+
+  await assert.rejects(runDeploy(config, packageRoot), (error) => {
+    assert.match(error.message, /identity\.legacyTokenFile/);
+    assert.match(error.message, /after the final cutover remove the identity\.legacyTokenFile field/);
+    assert.match(error.message, /overlap host config/);
+    return true;
+  });
+  assert.equal(await exists(config.deployRoot), false, 'a refused legacy file must not deploy anything');
+});
+
 test('missing token files are created, valid bytes are preserved and invalid/duplicate tokens are refused', async (t) => {
-  const sandbox = await makeSandbox(t);
+  const sandbox = testDir(t, 'controller-deploy');
   const packageRoot = await makePackage(path.join(sandbox, 'package'));
   const config = makeConfig(sandbox);
   await runDeploy(config, packageRoot);
@@ -197,7 +192,7 @@ test('missing token files are created, valid bytes are preserved and invalid/dup
 });
 
 test('peer configs share a preexisting stateDir, use their own credentials and preserve settings', async (t) => {
-  const sandbox = await makeSandbox(t);
+  const sandbox = testDir(t, 'controller-deploy');
   const packageRoot = await makePackage(path.join(sandbox, 'package'));
   const config = makeConfig(sandbox);
   const sharedState = path.join(sandbox, 'shared-state');
@@ -248,8 +243,80 @@ test('peer configs share a preexisting stateDir, use their own credentials and p
   await assert.rejects(runDeploy(config, packageRoot), /does not use its own credential file/);
 });
 
+test('peer config paths are normalized before comparison and a conflicting stateDir is refused', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const packageRoot = await makePackage(path.join(sandbox, 'package'));
+  const config = makeConfig(sandbox);
+  const layout = identityLayout(config);
+  const stateDir = path.join(config.deployRoot, 'state');
+  const normalizedState = `${slash(path.dirname(stateDir))}/scratch/../${path.basename(stateDir)}`;
+  const normalizedCredential = `${slash(path.dirname(layout.tokenFiles.claude))}/./${path.basename(layout.tokenFiles.claude)}`;
+
+  await writeFile(layout.peerConfigPath, `${JSON.stringify({ schemaVersion: 1, stateDir: normalizedState, peers: {} }, null, 2)}\n`);
+  await writeFile(layout.peerFiles.claude, `${JSON.stringify({
+    schemaVersion: 1,
+    stateDir: `${slash(path.dirname(stateDir))}/./${path.basename(stateDir)}`,
+    bridge: { credentialFile: normalizedCredential },
+  }, null, 2)}\n`);
+
+  await runDeploy(config, packageRoot);
+  const claudePeer = await readJson(layout.peerFiles.claude);
+  assert.equal(path.resolve(claudePeer.stateDir), path.resolve(stateDir), 'a normalized stateDir is accepted');
+  assert.equal(path.resolve(claudePeer.bridge.credentialFile), path.resolve(layout.tokenFiles.claude), 'a normalized credential path is accepted');
+
+  claudePeer.stateDir = slash(path.join(sandbox, 'other-state'));
+  await writeFile(layout.peerFiles.claude, `${JSON.stringify(claudePeer, null, 2)}\n`);
+  await assert.rejects(runDeploy(config, packageRoot), /does not use the shared stateDir/);
+});
+
+test('stateDir and credential path comparisons are case-insensitive only on Windows', async (t) => {
+  const left = path.join(process.cwd(), 'ControllerDeployCase', 'Shared');
+  const right = path.join(process.cwd(), 'controllerdeploycase', 'shared');
+  assert.equal(samePath(left, right, 'win32'), true, 'Windows path comparisons ignore case');
+  assert.equal(samePath(left, right, 'linux'), false, 'other platforms keep case-sensitive path comparisons');
+  assert.equal(samePath(`${path.dirname(left)}/./${path.basename(left)}`, left, 'linux'), true, 'paths are normalized before comparison');
+
+  const stateSandbox = testDir(t, 'controller-deploy');
+  const stateConfig = makeConfig(stateSandbox);
+  const statePackage = await makePackage(path.join(stateSandbox, 'package'));
+  const stateLayout = identityLayout(stateConfig);
+  const stateDir = path.join(stateConfig.deployRoot, 'state');
+  const caseState = slash(path.join(path.dirname(stateDir), path.basename(stateDir).toUpperCase()));
+  await writeFile(stateLayout.peerConfigPath, `${JSON.stringify({ schemaVersion: 1, stateDir: slash(stateDir), peers: {} }, null, 2)}\n`);
+  await writeFile(stateLayout.peerFiles.claude, `${JSON.stringify({
+    schemaVersion: 1,
+    stateDir: caseState,
+    bridge: { credentialFile: slash(stateLayout.tokenFiles.claude) },
+  }, null, 2)}\n`);
+  if (process.platform === 'win32') {
+    await runDeploy(stateConfig, statePackage);
+    assert.equal((await readJson(stateLayout.peerFiles.claude)).stateDir, caseState, 'Windows accepts a stateDir that differs only in case');
+  } else {
+    await assert.rejects(runDeploy(stateConfig, statePackage), /does not use the shared stateDir/, 'other platforms keep case-sensitive stateDir comparisons');
+  }
+
+  const credentialSandbox = testDir(t, 'controller-deploy');
+  const credentialConfig = makeConfig(credentialSandbox);
+  const credentialPackage = await makePackage(path.join(credentialSandbox, 'package'));
+  const credentialLayout = identityLayout(credentialConfig);
+  const credentialState = path.join(credentialConfig.deployRoot, 'state');
+  const caseCredential = slash(path.join(path.dirname(credentialLayout.tokenFiles.claude), path.basename(credentialLayout.tokenFiles.claude).toUpperCase()));
+  await writeFile(credentialLayout.peerConfigPath, `${JSON.stringify({ schemaVersion: 1, stateDir: slash(credentialState), peers: {} }, null, 2)}\n`);
+  await writeFile(credentialLayout.peerFiles.claude, `${JSON.stringify({
+    schemaVersion: 1,
+    stateDir: slash(credentialState),
+    bridge: { credentialFile: caseCredential },
+  }, null, 2)}\n`);
+  if (process.platform === 'win32') {
+    await runDeploy(credentialConfig, credentialPackage);
+    assert.equal((await readJson(credentialLayout.peerFiles.claude)).bridge.credentialFile, caseCredential, 'Windows accepts a credential path that differs only in case');
+  } else {
+    await assert.rejects(runDeploy(credentialConfig, credentialPackage), /does not use its own credential file/, 'other platforms keep case-sensitive credential comparisons');
+  }
+});
+
 test('Codex MCP config migrates to A3 stdio carriers and generated launchers provide the real root env', async (t) => {
-  const sandbox = await makeSandbox(t);
+  const sandbox = testDir(t, 'controller-deploy');
   const packageRoot = await makePackage(path.join(sandbox, 'package'));
   const config = makeConfig(sandbox, { claudeExecutable: process.execPath, codexExecutable: process.execPath });
   const spawn = makeSpawn();
@@ -342,7 +409,7 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
 });
 
 test('operator CLI enforces loopback, admin identity, mutation/reason and redacts the token', async (t) => {
-  const sandbox = await makeSandbox(t);
+  const sandbox = testDir(t, 'controller-deploy');
   const token = FAKE_TOKEN('operator');
   const tokenFile = path.join(sandbox, 'operator.token');
   const argsFile = path.join(sandbox, 'args.json');
@@ -435,4 +502,65 @@ test('operator CLI enforces loopback, admin identity, mutation/reason and redact
   assert.equal(credentialCode, 2);
   assert.equal(credentialCalls, 0);
   assert.ok(MUTATION_TOOLS.length >= 13);
+});
+
+test('operator redacts nested quoted and backslash tokens before serializing success and error output', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const token = `${'q'.repeat(20)}"\\${'z'.repeat(8)}`;
+  assert.match(token, /^[\x21-\x7e]{24,512}$/);
+  const tokenFile = path.join(sandbox, 'operator.token');
+  const argsFile = path.join(sandbox, 'args.json');
+  await writeFile(tokenFile, token);
+  await writeFile(argsFile, `${JSON.stringify({ taskId: 'task-1', override: { reason: 'nested' } })}\n`);
+  const escaped = JSON.stringify(token).slice(1, -1);
+  const argv = ['--url', 'http://127.0.0.1:4321/mcp', '--credential-file', tokenFile, '--tool', 'bridge_cancel', '--args-file', argsFile];
+
+  let calls = 0;
+  const successFetch = async () => {
+    calls += 1;
+    if (calls === 1) return capabilitiesResponse(true);
+    return response({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        structuredContent: {
+          accepted: true,
+          echo: token,
+          nested: { list: [`before ${token} after`, { deep: token, count: 2 }], empty: [] },
+          [`key-${token}`]: token,
+        },
+      },
+    });
+  };
+  let out = '';
+  let err = '';
+  const code = await operatorMain(argv, { fetchImpl: successFetch, stdout: (text) => { out += text; }, stderr: (text) => { err += text; } });
+  assert.equal(code, 0, err);
+  assert.equal(calls, 2, 'exactly capabilities then the requested mutation');
+  assert.equal(out.includes(token), false, 'stdout must not contain the raw token');
+  assert.equal(out.includes(escaped), false, 'stdout must not contain the JSON-escaped token');
+  assert.deepEqual(JSON.parse(out), {
+    accepted: true,
+    echo: '[redacted]',
+    nested: { list: ['before [redacted] after', { deep: '[redacted]', count: 2 }], empty: [] },
+    'key-[redacted]': '[redacted]',
+  });
+
+  let errorCalls = 0;
+  const errorFetch = async () => {
+    errorCalls += 1;
+    if (errorCalls === 1) return capabilitiesResponse(true);
+    return response({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'TASK_NOT_OWNED', message: `refused ${token}` }) }] },
+    });
+  };
+  let errorText = '';
+  const errorCode = await operatorMain(argv, { fetchImpl: errorFetch, stdout: () => {}, stderr: (text) => { errorText += text; } });
+  assert.equal(errorCode, 1);
+  assert.equal(errorCalls, 2);
+  assert.equal(errorText.includes(token), false, 'stderr must not contain the raw token');
+  assert.equal(errorText.includes(escaped), false, 'stderr must not contain the JSON-escaped token');
+  assert.match(errorText, /\[redacted\]/);
 });

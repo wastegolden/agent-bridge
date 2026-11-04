@@ -175,8 +175,13 @@ async function callTool({ url, token, tool, args, fetchImpl }) {
 }
 
 function redact(value, token) {
-  const text = String(value ?? '');
-  return token === null ? text : text.split(token).join('[redacted]');
+  if (token === null) return value;
+  if (typeof value === 'string') return value.split(token).join('[redacted]');
+  if (Array.isArray(value)) return value.map((entry) => redact(entry, token));
+  if (isPlainObject(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [redact(key, token), redact(entry, token)]));
+  }
+  return value;
 }
 
 export async function main(argv = process.argv.slice(2), io = {}) {
@@ -204,11 +209,11 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       fail('E_IDENTITY', 'the credential must resolve to an enabled administrator controller identity');
     }
     const result = await callTool({ url: options.url, token, tool: options.tool, args, fetchImpl });
-    stdout(`${redact(JSON.stringify(result, null, 2), token)}\n`);
+    stdout(`${JSON.stringify(redact(result, token), null, 2)}\n`);
     return 0;
   } catch (error) {
     // Every externally sourced message is redacted before it reaches stderr.
-    stderr(`${error?.code ?? 'E_OPERATOR'}: ${redact(error?.message ?? error, token)}\n`);
+    stderr(`${error?.code ?? 'E_OPERATOR'}: ${redact(error?.message ?? error ?? '', token)}\n`);
     return ['E_ARGS', 'E_URL', 'E_CREDENTIAL', 'E_ARGS_FILE'].includes(error?.code) ? 2 : 1;
   }
 }

@@ -108,6 +108,16 @@ export function parseArgs(argv) {
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const slash = (value) => value.replaceAll('\\', '/');
 
+/**
+ * Compare two path spellings after normalizing both.
+ * Windows paths are case-insensitive; every other platform keeps exact case.
+ */
+export function samePath(left, right, platform = process.platform) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 export function validateConfig(config) {
   if (!isPlainObject(config)) throw new Error('deploy config: must be a JSON object');
   for (const key of ['deployRoot', 'nodePath', 'bridgeUrl']) {
@@ -212,6 +222,13 @@ export async function inspectIdentity(layout) {
   }
   let legacy = null;
   if (layout.legacyTokenFile !== null) {
+    if (!(await exists(layout.legacyTokenFile))) {
+      throw new Error(
+        `deploy config: identity.legacyTokenFile does not exist: ${layout.legacyTokenFile}; `
+        + 'after the final cutover remove the identity.legacyTokenFile field from the deploy config. '
+        + 'Keep the token file itself while the overlap host config still references it.',
+      );
+    }
     legacy = await readToken(layout.legacyTokenFile, true);
     if (seen.has(legacy.token)) throw new Error('deploy config: the legacy token duplicates a controller token');
   }
@@ -307,11 +324,11 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   for (const id of ['claude', 'codex']) {
     const existing = files[id];
     if (existing === null) continue;
-    if (typeof existing.stateDir !== 'string' || !path.isAbsolute(existing.stateDir) || path.resolve(existing.stateDir) !== stateDir) {
+    if (typeof existing.stateDir !== 'string' || !path.isAbsolute(existing.stateDir) || !samePath(existing.stateDir, stateDir)) {
       throw new Error(`deploy config: existing ${id} peer config does not use the shared stateDir ${stateDir}: ${layout.peerFiles[id]}`);
     }
     const credentialFile = existing.bridge?.credentialFile;
-    if (typeof credentialFile !== 'string' || !path.isAbsolute(credentialFile) || path.resolve(credentialFile) !== path.resolve(layout.tokenFiles[id])) {
+    if (typeof credentialFile !== 'string' || !path.isAbsolute(credentialFile) || !samePath(credentialFile, layout.tokenFiles[id])) {
       throw new Error(`deploy config: existing ${id} peer config does not use its own credential file ${layout.tokenFiles[id]}: ${layout.peerFiles[id]}`);
     }
   }
