@@ -188,7 +188,11 @@ test('override audit intent is durable before synchronous followup and result ca
   await assert.rejects(call('bridge_followup', { ...argsFor('bridge_followup', task, f.directory), override }, context('operator', true)), { code: 'OVERRIDE_AUDIT_INCOMPLETE' });
   f.store.event = event;
   await call('bridge_followup', { ...argsFor('bridge_followup', task, f.directory), override }, context('operator', true));
-  assert.equal(f.store.events(task.id).at(-1).accepted, false);
+  // S4 C9: a follow-up's audit outcome records only `replay`; task-level `accepted` is not copied.
+  const last = f.store.events(task.id).at(-1);
+  assert.equal(last.type, 'task/override-result');
+  assert.equal(last.outcome, 'returned');
+  assert.equal(Object.hasOwn(last, 'accepted'), false);
 });
 
 test('real followup replay is authorized first, retains history and audits new/current attempts', async t => {
