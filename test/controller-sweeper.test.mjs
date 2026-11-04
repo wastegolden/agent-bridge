@@ -515,3 +515,44 @@ test('cleanup_run forwards optional retry, exposes ownership and preserves defau
   const schema = tools.result.tools.find((tool) => tool.name === 'cleanup_run').inputSchema;
   assert.deepEqual(schema.properties.retry.required, ['recordIds', 'reason']);
 });
+
+test('a Claude sibling directory that cannot be removed yet keeps the session findable and is cleaned later', async (t) => {
+  const stateDir = testDir(t, 'f5-claude-partial');
+  await seed(stateDir, { sessions: [CLAUDE] });
+  const bridge = bridgeFor(A);
+  const projects = path.join(stateDir, 'projects');
+  const project = path.join(projects, 'project');
+  await mkdir(path.join(project, CLAUDE_ID), { recursive: true });
+  await writeFile(path.join(project, CLAUDE_ID, 'tool-output.txt'), 'busy');
+  await writeFile(path.join(project, `${CLAUDE_ID}.jsonl`), 'session');
+  const before = await rawIndex(stateDir);
+  const busy = async (target) => {
+    if (path.basename(target) === CLAUDE_ID) throw Object.assign(new Error('directory in use'), { code: 'EBUSY' });
+    assert.fail(`unexpected rm of ${target} while the sibling directory is busy`);
+  };
+  const first = await sweep(stateDir, bridge, { claudeProjectsDir: projects, fsImpl: { rm: busy } });
+  assert.deepEqual(first.actions.map((a) => a.state), ['deferred']);
+  assert.equal(await rawIndex(stateDir), before, 'a deferred partial deletion writes no index event');
+  assert.ok((await stat(path.join(project, `${CLAUDE_ID}.jsonl`))).isFile(), 'the locator file survives the failed attempt');
+  const second = await sweep(stateDir, bridge, { claudeProjectsDir: projects });
+  assert.deepEqual(second.actions.map((a) => a.state), ['deleted']);
+  await assert.rejects(stat(path.join(project, CLAUDE_ID)), { code: 'ENOENT' });
+  await assert.rejects(stat(path.join(project, `${CLAUDE_ID}.jsonl`)), { code: 'ENOENT' });
+});
+
+test('a peer-only closeout still writes its record, ownerless, while the bridge identity is unavailable', async (t) => {
+  const root = testDir(t, 'f5-closeout-peer-only-outage');
+  const projectRoot = path.join(root, 'project');
+  await mkdir(path.join(projectRoot, '.git'), { recursive: true });
+  const stateDir = path.join(root, 'state');
+  const bridge = bridgeFor(A);
+  bridge.controllerIdentity = async () => { throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'offline'); };
+  const job = { jobId: 'peer-1793700000000-0123abcd', rootTask: 'root', status: 'completed', target: 'codex', mode: 'consult', sessionId: CODEX_ID, cwd: projectRoot };
+  const result = await closeoutRootTask({
+    stateDir, bridge, rootTask: 'root', context: { self: 'claude-code', chain: ['claude-code'] }, now: () => NOW,
+    jobs: { list: async () => [job.jobId], wait: async () => job, result: async () => ({ finalMessage: 'answer' }) },
+    input: { title: 'Peer only', outcome: 'accepted', conclusion: 'Done', projectRoot },
+  });
+  assert.equal(result.owner, null);
+  assert.equal((await readIndex(stateDir)).get(result.recordId).owner, null);
+});

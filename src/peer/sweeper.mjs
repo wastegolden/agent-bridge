@@ -295,11 +295,14 @@ async function deleteClaudeSession(id, deps) {
     if (matches.length === 0) return { action, state: 'skipped', note: NOTE_CLAUDE_FILE_MISSING };
     if (matches.length > 1) return { action, state: 'failed', note: NOTE_CLAUDE_AMBIGUOUS };
     const dir = matches[0];
-    await deps.rm(path.join(dir, `${id}.jsonl`));
+    // The .jsonl file is how the next sweep finds this session again, so it is removed
+    // last: a sibling directory that cannot be removed yet (EBUSY, EPERM) leaves the
+    // session findable and deferred instead of stranding the directory forever.
     const sibling = path.join(dir, id);
     if (await isDirectoryEntry(sibling, deps.stat)) {
       await deps.rm(sibling, { recursive: true, force: true });
     }
+    await deps.rm(path.join(dir, `${id}.jsonl`));
     return { action, state: 'deleted', note: null };
   } catch (error) {
     return { action, state: isUnavailable(error) ? 'deferred' : 'failed', note: errorNote(error) };

@@ -331,10 +331,21 @@ export async function closeoutRootTask({
 
   // Harness/chain labels are provenance only. The record owner is the credential
   // principal returned by capabilities, including when a delegate closes the task.
-  // Peer-only clients can capture records without identity; their owner stays unknown.
-  const owner = typeof bridge.controllerIdentity === 'function'
-    ? (await bridge.controllerIdentity())?.self ?? null
-    : null;
+  // A record with DSH tasks needs that owner, so an identity outage refuses it. A
+  // peer-only record never needed the bridge: when the identity cannot be read it is
+  // written with owner null, which any root's sweeper may clean (local sessions only).
+  let owner = null;
+  if (typeof bridge.controllerIdentity === 'function') {
+    if (parsed.bridgeTaskIds.length > 0) {
+      owner = (await bridge.controllerIdentity())?.self ?? null;
+    } else {
+      try {
+        owner = (await bridge.controllerIdentity())?.self ?? null;
+      } catch {
+        owner = null;
+      }
+    }
+  }
 
   // --- 4. project root + git exclusion -------------------------------------------
   let projectRoot = parsed.projectRoot;
