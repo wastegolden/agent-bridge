@@ -8,10 +8,8 @@ import { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA } from './too
 export { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA };
 
 const object = properties => ({type:'object',properties,additionalProperties:false});
-// Advertised release identity (bridge 1.5.0 / adapter 0.5.0). 1.4.0 makes the bridge
-// controller-neutral: the controller of a task is whichever harness submitted it
-// (Codex or Claude Code). Persisted identities (origin, ownerId, endpoint) are unchanged.
-export const BRIDGE_VERSION='1.5.0';
+// Advertised bridge release identity matches the plugin release.
+export const BRIDGE_VERSION='1.8.0';
 const str={type:'string'};const num={type:'integer'};const bool={type:'boolean'};
 const taskArgs={taskId:str};
 const overrideSchema=object({reason:{type:'string',maxLength:500,pattern:'\\S'}});
@@ -184,16 +182,29 @@ export function createDispatcher(service){
    const outcome={type:'task/override-result',operationId,outcome:businessError?'threw':'returned',attemptId:service.store.get(task.id).attemptId};
    if(businessError)outcome.code=businessError.code??'INTERNAL';
    else{
-    // Pause/resume return their operation outcome beside the task projection.
-    const operationResult=name==='bridge_pause'?result?.pause:name==='bridge_resume'?result?.resume:result;
-    for(const key of ['accepted','merged','archived','cleaned','eligible','replay']){
+    // Select only this call's operation fields. Task projections can carry an
+    // earlier acknowledgement and error, including on successful replays.
+    let operationResult,fields=[];
+    switch(name){
+     case 'bridge_cancel':operationResult=result?.cancel;fields=['accepted'];break;
+     case 'bridge_pause':operationResult=result?.pause;fields=['accepted','replay'];break;
+     case 'bridge_resume':operationResult=result?.resume;fields=['accepted','replay'];break;
+     case 'bridge_clarify':operationResult={replay:result?.clarificationReplay};fields=['replay'];break;
+     case 'bridge_followup':operationResult={replay:result?.followup?.replay};fields=['replay'];break;
+     case 'bridge_approve':case 'bridge_reconcile':break;
+     case 'bridge_acknowledge':operationResult={accepted:result?.accepted};fields=['accepted'];break;
+     case 'bridge_archive':operationResult=result;fields=['archived'];break;
+     case 'bridge_cleanup':operationResult=result;fields=['cleaned','eligible'];break;
+     case 'bridge_workspace_review':operationResult=result;fields=['passed'];break;
+     case 'bridge_workspace_refresh':operationResult=result;fields=['refreshed'];break;
+     case 'bridge_workspace_integrate':operationResult=result;fields=['accepted','merged'];break;
+    }
+    for(const key of fields){
      const value=operationResult?.[key];
      if(typeof value==='boolean')outcome[key]=value;
     }
     const returnedCode=operationResult?.code??operationResult?.error?.code;
     if(typeof returnedCode==='string')outcome.code=returnedCode;
-    const replay=result?.followup?.replay??result?.clarificationReplay;
-    if(typeof replay==='boolean')outcome.replay=replay;
    }
    service.store.event(task.id,outcome);
   }catch{fail('OVERRIDE_AUDIT_INCOMPLETE','Override outcome audit could not be persisted',{field:'override',expected:'inspect task and audit before retry'});}

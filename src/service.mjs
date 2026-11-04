@@ -561,7 +561,9 @@ export class BridgeService {
     }
     finally{this.controlBusy.delete(id);}
   }
-  async cancel(id,reason='controller requested'){    const task=this.store.get(id);if(TERMINAL.has(task.status))return {accepted:false,alreadyFinished:true,...this.view(task)};
+  async cancel(id,reason='controller requested'){
+    const task=this.store.get(id);
+    if(TERMINAL.has(task.status))return {...this.view(task),cancel:{accepted:false,alreadyFinished:true}};
     // A controller cancellation is recorded durably BEFORE it is attempted: a worker
     // cancelled by the controller must stay cancelled and can never be mistaken for an
     // ordinary failure that the long-task orchestrator may repair.
@@ -600,10 +602,10 @@ export class BridgeService {
         if(settled.project)void Promise.resolve().then(()=>this.projects.requestProjectCancel(id,reason)).catch(e=>{this.lastError={code:e.code??'PROJECT_ERROR',message:e.message};});
         else void Promise.resolve().then(()=>this.projects.onTaskSettled(settled)).catch(e=>{this.lastError={code:e.code??'PROJECT_ERROR',message:e.message};});
       }
-      return this.get(id);
+      return {...this.get(id),cancel:{accepted:true}};
     }
     this.store.update(id,{status:'cancelling',phase:'cancelling'});this.store.event(id,{type:'task/cancel-requested',reason});
-    if(!task.dispatchStarted){if(!this.running.has(id))this.finish(id,{status:'cancelled',text:'Never dispatched',stopConfirmed:true,activeJobs:0});return this.get(id);}
+    if(!task.dispatchStarted){if(!this.running.has(id))this.finish(id,{status:'cancelled',text:'Never dispatched',stopConfirmed:true,activeJobs:0});return {...this.get(id),cancel:{accepted:true}};}
     // A cancel outcome or error is DELAYED host evidence: it must never overwrite a newer
     // attempt, nor a SAME attempt that already settled with a positive stop. Without this
     // fence a late `adapter/unknown-task` from a timeout cancellation can clobber the
