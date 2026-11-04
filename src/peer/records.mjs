@@ -38,7 +38,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_SLUG_CHARS = 40;
 const OUTCOMES_RETAINED_LONGER = Object.freeze(['failed', 'disputed', 'unresolved']);
 const OUTCOMES = Object.freeze(['accepted', ...OUTCOMES_RETAINED_LONGER]);
-const SESSION_STATES = Object.freeze(['archived', 'deleted', 'skipped', 'failed']);
+const SESSION_STATES = Object.freeze(['pending', 'archived', 'deleted', 'skipped', 'failed']);
 const INDEX_KINDS = Object.freeze(['record', 'session']);
 
 function isObject(value) {
@@ -279,7 +279,7 @@ function sessionsOf({ bridgeTasks, peerJobs }) {
     // (the packet's dossier is the input shape), not on the outer task wrapper.
     const dossier = isObject(task.dossier) ? task.dossier : {};
     if (typeof dossier.sessionId === 'string' && dossier.sessionId !== '') {
-      sessions.push(sessionEntry(dossier.harness ?? 'dsh', dossier.sessionId, dossier.taskId));
+      sessions.push({ ...sessionEntry(dossier.harness ?? 'dsh', dossier.sessionId, dossier.taskId), submittedBy: dossier.submittedBy ?? null });
     }
   }
   for (const entry of peerJobs) {
@@ -300,6 +300,7 @@ function renderRecordHeading(input) {
     title: input.title ?? null,
     projectRoot: input.projectRoot ?? null,
     controller: input.controller ?? null,
+    owner: input.owner ?? null,
     chain: input.chain ?? null,
     closedAt: isoOrText(input.closedAt),
     outcome: input.outcome ?? null,
@@ -417,6 +418,7 @@ function renderBridgeTask(task) {
     `- 角色: ${inline(dossier.role)}`,
     `- 状态: ${inline(dossier.status)}`,
     `- 控制器: ${inline(dossier.controller)}`,
+    `- 提交主体: ${inline(dossier.submittedBy)}`,
     `- 模型: ${inline(model.provider)}/${inline(model.model)}${text(model.reasoningEffort) === '' ? '' : ` (reasoningEffort=${model.reasoningEffort})`}`,
     `- 工具调用: ${stats.toolCalls === undefined || stats.toolCalls === null ? RECORD_MISSING : String(stats.toolCalls)}`,
     '',
@@ -642,6 +644,8 @@ function recordStateFromEvent(event) {
       harness: session.harness ?? null,
       id: session.id ?? null,
       source: session.source ?? null,
+      ...(Object.hasOwn(session, 'submittedBy') ? { submittedBy: session.submittedBy } : {}),
+      ...(Object.hasOwn(session, 'revision') ? { revision: session.revision } : {}),
       state: 'pending',
       note: null,
       at: null,
@@ -649,6 +653,7 @@ function recordStateFromEvent(event) {
   }
   return {
     recordId: event.recordId ?? null,
+    ...(Object.hasOwn(event, 'owner') ? { owner: event.owner } : {}),
     rootTask: event.rootTask ?? null,
     title: event.title ?? null,
     projectRoot: event.projectRoot ?? null,
@@ -701,7 +706,7 @@ export async function appendIndexEvent(stateDir, event, {
 /**
  * Fold the index in file order. A `record` event creates the entry and marks every one
  * of its sessions `pending`; a `session` event updates that one session's state, note
- * and time.
+ * and time. Explicit retry events restore pending and retain their audit metadata.
  *
  * `map.skipped` counts exactly two categories, as the specification enumerates them:
  *   * lines that are not usable index events — invalid JSON, a JSON value that is not an
@@ -764,6 +769,7 @@ export async function readIndex(stateDir, { readFile: readFileImpl = readFile } 
     session.state = SESSION_STATES.includes(event.state) ? event.state : session.state;
     session.note = event.note ?? null;
     session.at = 'at' in event ? event.at ?? null : null;
+    if (event.retry) session.retry = event.retry;
   }
   return index;
 }

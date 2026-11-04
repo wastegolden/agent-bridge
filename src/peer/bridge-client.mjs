@@ -93,7 +93,7 @@ function parseBridgeError(payload) {
  * @param {Function} [spec.readFileImpl] credential-file seam.
  * @param {number} [spec.timeoutMs] per-request AbortSignal timeout.
  * @param {Function} [spec.getContext] resolves the verified peer lineage before a call.
- * @returns {Readonly<{dossier: Function, resultText: Function, archive: Function, cleanup: Function, prepareDelegateCredential: Function}>}
+ * @returns {Readonly<{controllerIdentity: Function, dossier: Function, resultText: Function, archive: Function, cleanup: Function, prepareDelegateCredential: Function}>}
  * @throws {PeerPolicyError} PEER_CONFIG_INVALID for a non-loopback url or a bad seam.
  */
 export function createBridgeClient({
@@ -199,17 +199,23 @@ export function createBridgeClient({
     return payload.result.structuredContent;
   }
 
+  /** Read the authenticated principal; admin is valid for read-only identity queries. */
+  async function controllerIdentity(credential = null, forDelegation = false) {
+    const capabilities = await call('bridge_capabilities', {}, credential);
+    const identity = capabilities?.controllerIdentity;
+    if (forDelegation && identity?.admin === true) {
+      throw new PeerPolicyError('PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN', 'administrator bridge credentials cannot be delegated');
+    }
+    if (identity?.enabled !== true || typeof identity.admin !== 'boolean' || typeof identity.self !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(identity.self)) {
+      throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'bridge controller identity could not be verified');
+    }
+    return identity;
+  }
+
   /** Resolve once, verify with that exact token, and keep the credential in memory only. */
   async function prepareDelegateCredential() {
     const credential = await resolveCallCredential('bridge_capabilities');
-    const capabilities = await call('bridge_capabilities', {}, credential);
-    const identity = capabilities?.controllerIdentity;
-    if (identity?.admin === true) {
-      throw new PeerPolicyError('PEER_BRIDGE_ADMIN_DELEGATION_FORBIDDEN', 'administrator bridge credentials cannot be delegated');
-    }
-    if (identity?.enabled !== true || identity.admin !== false || typeof identity.self !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(identity.self)) {
-      throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'bridge controller identity could not be verified');
-    }
+    const identity = await controllerIdentity(credential, true);
     return { token: credential.token, principal: { id: identity.self, admin: false } };
   }
 
@@ -289,5 +295,5 @@ export function createBridgeClient({
     return call('bridge_cleanup', { taskId, dryRun: dryRun === true });
   }
 
-  return Object.freeze({ dossier, resultText, archive, cleanup, prepareDelegateCredential });
+  return Object.freeze({ controllerIdentity: () => controllerIdentity(), dossier, resultText, archive, cleanup, prepareDelegateCredential });
 }

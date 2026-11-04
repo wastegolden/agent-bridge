@@ -169,12 +169,12 @@ function firstNonBlankString(values) {
  * @param {string} spec.rootTask effective root task label, already resolved by the caller.
  * @param {{self: string, chain: string[], root: string}} spec.context chain context.
  * @param {object} spec.jobs peer job manager (list/wait/result).
- * @param {object} spec.bridge bridge client (dossier/resultText).
+ * @param {object} spec.bridge bridge client (controllerIdentity/dossier/resultText).
  * @param {string} spec.stateDir absolute state directory holding jobs/ and the index.
  * @param {object} [spec.recordsConfig] record directory and retention windows.
  * @param {Function} [spec.now] clock seam (epoch milliseconds).
  * @param {Function} [spec.readFileImpl] seam for reading prompt.txt.
- * @returns {Promise<{recordId: string, path: string, sha256: string, eligibleAt: number|null, sessions: object[], reused: boolean}>}
+ * @returns {Promise<{recordId: string, owner: string|null, path: string, sha256: string, eligibleAt: number|null, sessions: object[], reused: boolean}>}
  */
 export async function closeoutRootTask({
   input,
@@ -320,6 +320,7 @@ export async function closeoutRootTask({
   if (known) {
     return {
       recordId,
+      owner: known.owner ?? null,
       path: known.path,
       sha256: known.sha256,
       eligibleAt: known.eligibleAt ?? null,
@@ -327,6 +328,13 @@ export async function closeoutRootTask({
       reused: true,
     };
   }
+
+  // Harness/chain labels are provenance only. The record owner is the credential
+  // principal returned by capabilities, including when a delegate closes the task.
+  // Peer-only clients can capture records without identity; their owner stays unknown.
+  const owner = typeof bridge.controllerIdentity === 'function'
+    ? (await bridge.controllerIdentity())?.self ?? null
+    : null;
 
   // --- 4. project root + git exclusion -------------------------------------------
   let projectRoot = parsed.projectRoot;
@@ -360,6 +368,7 @@ export async function closeoutRootTask({
 
   const content = renderRecord({
     recordId,
+    owner,
     rootTask: task,
     title: parsed.title,
     projectRoot,
@@ -382,6 +391,7 @@ export async function closeoutRootTask({
   await appendIndexEvent(stateDir, {
     kind: 'record',
     recordId,
+    owner,
     rootTask: task,
     title: parsed.title,
     projectRoot,
@@ -394,7 +404,7 @@ export async function closeoutRootTask({
     sessions,
   });
 
-  return { recordId, path: written.path, sha256: written.sha256, eligibleAt, sessions, reused: false };
+  return { recordId, owner, path: written.path, sha256: written.sha256, eligibleAt, sessions, reused: false };
 }
 
 /** The sessions a closeout covers: DSH bridge sessions first, then peer job sessions. */
@@ -407,6 +417,7 @@ function closeoutSessions(bridgeEntries, peerEntries) {
         id: dossier.sessionId,
         source: typeof dossier.taskId === 'string' && dossier.taskId !== '' ? dossier.taskId : taskId,
         revision: dossier.revision ?? null,
+        submittedBy: dossier.submittedBy ?? null,
       });
     }
   }
