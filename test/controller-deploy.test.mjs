@@ -20,6 +20,7 @@ import { testDir } from './helpers/test-root.mjs';
 import {
   deploy,
   identityLayout,
+  parseArgs,
   samePath,
 } from '../scripts/deploy-local.mjs';
 import {
@@ -142,6 +143,84 @@ test('identity dry-run creates no token, config, launcher or deployment files', 
     runDeploy({ ...config, identity: { ...config.identity, credentialDirectory: 'relative' } }, packageRoot, { dryRun: true }),
     /absolute local path/,
   );
+});
+
+test('prepare-only requires identity and its dry-run leaves all deployment paths absent', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const packageRoot = await makePackage(path.join(sandbox, 'package'));
+  const config = makeConfig(sandbox);
+  assert.equal(parseArgs(['--config', 'deploy.json', '--prepare-only', '--dry-run']).prepareOnly, true);
+  await assert.rejects(runDeploy({ ...config, identity: undefined }, packageRoot, { prepareOnly: true }), /requires identity/);
+  const { report } = await runDeploy(config, packageRoot, { prepareOnly: true, dryRun: true, spawnImpl: () => assert.fail('prepare-only must not run an app') });
+  assert.equal(report.prepareOnly, true);
+  assert.equal(report.dryRun, true);
+  assert.equal(path.dirname(report.preparedPluginDir), config.deployRoot);
+  for (const dir of [report.preparedPluginDir, config.deployRoot, config.codexPluginDir, config.identity.credentialDirectory]) {
+    assert.equal(await exists(dir), false);
+  }
+});
+
+test('prepare-only creates distinct stable packages while preserving active clients and existing identity artifacts', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const packageRoot = await makePackage(path.join(sandbox, 'package'));
+  const config = makeConfig(sandbox, { claudeExecutable: process.execPath, codexExecutable: process.execPath,
+    codexMarketplace: path.join(sandbox, 'codex-marketplace.json') });
+  const layout = identityLayout(config);
+  const preserved = new Map([
+    [path.join(config.deployRoot, 'plugin', 'active.txt'), 'active plugin bytes'],
+    [path.join(config.deployRoot, 'plugin.prev', 'previous.txt'), 'previous plugin bytes'],
+    [path.join(config.deployRoot, '.claude-plugin', 'marketplace.json'), '{"oldClaudeMarketplace":true}'],
+    [path.join(config.codexPluginDir, '.mcp.json'), '{"mcpServers":{"old":{"url":"http://127.0.0.1:1"}}}'],
+    [path.join(config.codexPluginDir, '.codex-plugin', 'plugin.json'), '{"version":"old"}'],
+    [path.join(config.codexPluginDir, 'skills', 'keep.txt'), 'active skills'],
+    [config.codexMarketplace, '{"oldCodexMarketplace":true}'],
+    ...Object.entries(layout.tokenFiles).map(([id, file]) => [file, FAKE_TOKEN(id)]),
+    ...Object.entries(layout.peerFiles).map(([id, file]) => [file, JSON.stringify({ schemaVersion: 1, stateDir: path.join(sandbox, 'state'),
+      peers: {}, bridge: { url: config.bridgeUrl, credentialFile: layout.tokenFiles[id] }, keep: id })]),
+    ...Object.values(layout.hostFiles).map((file) => [file, '{"keepHostFragment":true}']),
+    ...Object.values(layout.launcherFiles).map((file) => [file, '// keep existing launcher\n']),
+  ]);
+  for (const [file, text] of preserved) await writeFile(file, text);
+  for (const name of ['.plans', '.runtime', '.worktrees', 'node_modules']) {
+    await writeFile(path.join(packageRoot, name, 'test-artifact.txt'), 'must not ship');
+  }
+  const spawn = makeSpawn();
+  const first = await runDeploy(config, packageRoot, { prepareOnly: true, spawnImpl: spawn.impl });
+  const second = await runDeploy(config, packageRoot, { prepareOnly: true, spawnImpl: spawn.impl });
+  assert.equal(spawn.calls.length, 0, 'preparation must not call either app CLI');
+  assert.notEqual(first.report.preparedPluginDir, second.report.preparedPluginDir);
+  for (const { report, stdout } of [first, second]) {
+    assert.equal(report.prepareOnly, true);
+    assert.equal(path.dirname(report.preparedPluginDir), config.deployRoot);
+    assert.match(path.basename(report.preparedPluginDir), /^plugin\.prepared-/);
+    assert.ok(stdout.includes(report.preparedPluginDir));
+    const manifest = await readJson(path.join(report.preparedPluginDir, '.claude-plugin', 'plugin.json'));
+    assert.equal(path.resolve(manifest.userConfig.bridge_credential_file.default), path.resolve(layout.tokenFiles.claude));
+    assert.equal(await fsp.readFile(path.join(report.preparedPluginDir, 'bin', 'bridge.mjs'), 'utf8'), '// test carrier\n');
+    for (const [id, file] of Object.entries(report.preparedLauncherFiles)) {
+      assert.equal(path.dirname(file), path.join(report.preparedPluginDir, 'config'));
+      const launcher = await fsp.readFile(file, 'utf8');
+      assert.equal(launcher.includes('readFile'), false);
+      assert.equal(/env\.DSH_MCP_TOKEN\s*=/.test(launcher), false);
+      assert.ok(launcher.includes(JSON.stringify(slash(layout.tokenFiles[id]))));
+      assert.ok(launcher.includes(JSON.stringify(slash(layout.peerFiles[id]))));
+    }
+    for (const name of ['.plans', '.runtime', '.worktrees', 'node_modules']) assert.equal(await exists(path.join(report.preparedPluginDir, name)), false);
+    for (const token of Object.entries(layout.tokenFiles).map(([id]) => FAKE_TOKEN(id))) assert.equal(stdout.includes(token), false);
+  }
+  for (const [file, text] of preserved) assert.equal(await fsp.readFile(file, 'utf8'), text, `preparation changed ${file}`);
+});
+
+test('prepare-only creates missing identity artifacts without installing client configuration', async (t) => {
+  const sandbox = testDir(t, 'controller-deploy');
+  const packageRoot = await makePackage(path.join(sandbox, 'package'));
+  const config = makeConfig(sandbox);
+  const { report } = await runDeploy(config, packageRoot, { prepareOnly: true, spawnImpl: () => assert.fail('unexpected app invocation') });
+  for (const file of [...Object.values(report.layout.tokenFiles), ...Object.values(report.layout.peerFiles), ...Object.values(report.layout.hostFiles), ...Object.values(report.layout.launcherFiles)]) {
+    assert.equal(await exists(file), true);
+  }
+  for (const dir of ['plugin', 'plugin.prev', '.claude-plugin']) assert.equal(await exists(path.join(config.deployRoot, dir)), false);
+  assert.equal(await exists(config.codexPluginDir), false);
 });
 
 test('a missing legacy token file is refused with the final-cutover instruction', async (t) => {
@@ -319,6 +398,13 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
   const sandbox = testDir(t, 'controller-deploy');
   const packageRoot = await makePackage(path.join(sandbox, 'package'));
   const config = makeConfig(sandbox, { claudeExecutable: process.execPath, codexExecutable: process.execPath });
+  config.identity.credentialDirectory = path.join(sandbox, '控制器 credentials');
+  const templateFile = path.join(packageRoot, '.codex-mcp.json');
+  const staleTemplate = await readJson(templateFile);
+  for (const entry of Object.values(staleTemplate.mcpServers)) {
+    entry.env = { ...entry.env, dsh_mcp_token: 'stale-token', Dsh_Bridge_Credential_File: 'stale-file', dsh_bridge_url: 'http://127.0.0.1:9999/old' };
+  }
+  await writeFile(templateFile, JSON.stringify(staleTemplate));
   const spawn = makeSpawn();
   const oldMcp = path.join(config.codexPluginDir, '.mcp.json');
   await writeFile(oldMcp, `${JSON.stringify({
@@ -347,7 +433,10 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
     assert.deepEqual(mcp.mcpServers[name].env_vars, template.mcpServers[name].env_vars);
     assert.equal(mcp.mcpServers[name].command, slash(process.execPath));
     assert.equal(envKey(mcp.mcpServers[name].env, 'DSH_MCP_TOKEN'), undefined);
-    assert.equal(envKey(mcp.mcpServers[name].env, 'DSH_BRIDGE_CREDENTIAL_FILE'), undefined);
+    assert.equal(path.resolve(envValue(mcp.mcpServers[name].env, 'DSH_BRIDGE_CREDENTIAL_FILE')), path.resolve(identityLayout(config).tokenFiles.codex));
+    assert.equal(envValue(mcp.mcpServers[name].env, 'DSH_BRIDGE_URL'), config.bridgeUrl);
+    assert.equal(mcp.mcpServers[name].env.Dsh_Bridge_Credential_File, undefined);
+    assert.equal(mcp.mcpServers[name].env.dsh_bridge_url, undefined);
   }
   assert.match(mcp.mcpServers.dsh_project.args[0], /plugin[\\/]bin[\\/]bridge\.mjs$/);
   assert.match(mcp.mcpServers.agent_peer.args[0], /plugin[\\/]bin[\\/]peer-mcp\.mjs$/);
@@ -355,7 +444,13 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
 
   const deployedPlugin = await readJson(path.join(config.deployRoot, 'plugin', '.claude-plugin', 'plugin.json'));
   assert.equal(path.resolve(deployedPlugin.userConfig.peer_config.default), path.resolve(identityLayout(config).peerFiles.claude));
-  assert.equal(deployedPlugin.mcpServers.dsh_project.headers.Authorization, 'Bearer ${DSH_MCP_TOKEN}');
+  assert.equal(path.resolve(deployedPlugin.userConfig.bridge_credential_file.default), path.resolve(identityLayout(config).tokenFiles.claude));
+  assert.equal(deployedPlugin.userConfig.dsh_bridge_url.default, config.bridgeUrl);
+  for (const entry of Object.values(deployedPlugin.mcpServers)) {
+    assert.equal(entry.env.DSH_BRIDGE_CREDENTIAL_FILE, '${user_config.bridge_credential_file}');
+    assert.equal(entry.env.DSH_BRIDGE_URL, '${user_config.dsh_bridge_url}');
+    assert.equal(entry.env.DSH_MCP_TOKEN, undefined);
+  }
 
   const layout = identityLayout(config);
   const claudeToken = (await fsp.readFile(layout.tokenFiles.claude, 'utf8')).trim();
@@ -368,7 +463,9 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
     const source = await fsp.readFile(file, 'utf8');
     assert.equal(source.includes(claudeToken), false, `${id} launcher must not contain the Claude token`);
     assert.equal(source.includes(codexToken), false, `${id} launcher must not contain the Codex token`);
-    assert.equal(source.includes('DSH_MCP_TOKEN = token') || source.includes('DSH_BRIDGE_CREDENTIAL_FILE = TOKEN_FILE'), true);
+    assert.equal(source.includes('DSH_BRIDGE_CREDENTIAL_FILE = TOKEN_FILE'), true);
+    assert.equal(source.includes('readFile'), false, `${id} launcher must not read the token`);
+    assert.equal(/env\.DSH_MCP_TOKEN\s*=/.test(source), false, `${id} launcher must not export a token`);
     // The regression passed the whole {claude,codex} map as CLI, so the generated
     // wrapper must embed one string (the selected root CLI), never an object.
     const cliLine = source.split('\n').find((line) => line.startsWith('const CLI = '));
@@ -388,7 +485,7 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
   for (const [id, expectedPeer] of [['claude', layout.peerFiles.claude], ['codex', layout.peerFiles.codex]]) {
     const out = path.join(sandbox, `${id}-launch.json`);
     const result = spawnSync(process.execPath, [layout.launcherFiles[id], capture, out, 'hello'], { encoding: 'utf8', env: decoyEnv });
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, result.error?.code ?? result.stderr);
     const captured = await readJson(out);
     assert.deepEqual(captured.argv, ['hello'], `${id} launcher must forward argv`);
     assert.equal(envValue(captured.env, 'KEEP_ME'), 'yes');
@@ -398,13 +495,8 @@ test('Codex MCP config migrates to A3 stdio carriers and generated launchers pro
     assert.equal(envValue(captured.env, 'AGENT_BRIDGE_ROOT_TASK'), undefined);
     assert.equal(path.resolve(envValue(captured.env, 'AGENT_PEER_CONFIG')), path.resolve(expectedPeer));
     assert.equal(envValue(captured.env, 'DSH_BRIDGE_URL'), config.bridgeUrl);
-    if (id === 'claude') {
-      assert.equal(envValue(captured.env, 'DSH_MCP_TOKEN'), claudeToken);
-      assert.equal(envValue(captured.env, 'DSH_BRIDGE_CREDENTIAL_FILE'), undefined);
-    } else {
-      assert.equal(envValue(captured.env, 'DSH_MCP_TOKEN'), undefined);
-      assert.equal(path.resolve(envValue(captured.env, 'DSH_BRIDGE_CREDENTIAL_FILE')), path.resolve(layout.tokenFiles.codex));
-    }
+    assert.equal(envValue(captured.env, 'DSH_MCP_TOKEN'), undefined);
+    assert.equal(path.resolve(envValue(captured.env, 'DSH_BRIDGE_CREDENTIAL_FILE')), path.resolve(layout.tokenFiles[id]));
   }
 });
 
@@ -426,8 +518,9 @@ test('operator CLI enforces loopback, admin identity, mutation/reason and redact
   };
   const baseArgv = ['--url', 'http://127.0.0.1:4321/mcp', '--credential-file', tokenFile, '--tool', 'bridge_cancel', '--args-file', argsFile];
 
-  const prior = process.env.DSH_MCP_TOKEN;
-  process.env.DSH_MCP_TOKEN = 'decoy-environment-token';
+  // Substitute a plain object; never write to Node's real environment store.
+  const envDescriptor = Object.getOwnPropertyDescriptor(process, 'env');
+  Object.defineProperty(process, 'env', { ...envDescriptor, value: { ...process.env, DSH_MCP_TOKEN: 'decoy-environment-token' } });
   try {
     let out = '';
     let err = '';
@@ -445,8 +538,7 @@ test('operator CLI enforces loopback, admin identity, mutation/reason and redact
     assert.equal(out.includes('[redacted]'), true, 'server-echoed token must be redacted');
     assert.equal(err, '');
   } finally {
-    if (prior === undefined) delete process.env.DSH_MCP_TOKEN;
-    else process.env.DSH_MCP_TOKEN = prior;
+    Object.defineProperty(process, 'env', envDescriptor);
   }
 
   // Non-loopback and URL userinfo are refused before any network call.

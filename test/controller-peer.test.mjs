@@ -169,7 +169,7 @@ test('peer bridge errors redact credentials in both messages and bridge error co
 
 for (const self of ['claude-code', 'codex']) {
   test(`${self} delegate and resume inherit the verified root credential without persisting it`, async (t) => {
-    const f = await fixture(t, { self, fileOnly: self === 'codex', env: { dsh_bridge_url: 'http://127.0.0.1:1/old' } });
+    const f = await fixture(t, { self, fileOnly: true, env: { dsh_bridge_url: 'http://127.0.0.1:1/old' } });
     const { job } = await f.ask();
     const launched = f.spawned[0];
     assert.equal(job.bridge.state, 'enabled');
@@ -184,10 +184,13 @@ for (const self of ['claude-code', 'codex']) {
     const target = self === 'codex' ? 'claude-code' : 'codex';
     assert.equal(launched.options.env.AGENT_BRIDGE_CHAIN, `${self}>${target}`);
 
-    // Exercise the delegated carrier with the exact spawn environment. Both
-    // directions must authenticate as the root and declare the child chain.
+    // The delegate's MCP settings may supply its own root file. The injected
+    // token still authenticates as the calling root and declares the child chain.
     const childCalls = [];
-    const carrier = createCarrier({ env: launched.options.env, watchdogEnabled: false, stdout: { write() {} },
+    const childFile = path.join(f.dir, 'other-root.token');
+    await writeFile(childFile, OTHER_TOKEN);
+    const childEnv = { ...launched.options.env, DSH_BRIDGE_CREDENTIAL_FILE: childFile };
+    const carrier = createCarrier({ env: childEnv, credentialFile: childFile, watchdogEnabled: false, stdout: { write() {} },
       fetchImpl: async (url, options) => { childCalls.push({ url, options }); return { status: 202 }; },
       readFileImpl: async () => assert.fail('child must use root token') });
     await carrier.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'bridge_submit', arguments: { packet: {} } } }));
@@ -195,6 +198,15 @@ for (const self of ['claude-code', 'codex']) {
     assert.equal(childCalls[0].options.headers.Authorization, `Bearer ${TOKEN}`);
     assert.equal(childCalls[0].options.headers['X-Agent-Bridge-Chain'], `${self}>${target}`);
     assert.equal(childCalls[0].options.headers['X-Agent-Bridge-Root-Task'], 'a3-root');
+    const childClient = createBridgeClient({ url: URL, env: childEnv, credentialFile: childFile,
+      readFileImpl: async () => assert.fail('delegate peer must use injected root token'),
+      fetchImpl: async (url, options) => {
+        assert.equal(options.headers.Authorization, `Bearer ${TOKEN}`);
+        assert.equal(options.headers['X-Agent-Bridge-Chain'], `${self}>${target}`);
+        return result(identity(self));
+      },
+    });
+    assert.deepEqual(await childClient.prepareDelegateCredential(), { token: TOKEN, principal: { id: self, admin: false } });
     if (target === 'claude-code') {
       assert.ok(launched.args.includes('--strict-mcp-config'));
       const mcp = JSON.parse(launched.args[launched.args.indexOf('--mcp-config') + 1]).mcpServers;
@@ -214,10 +226,10 @@ for (const self of ['claude-code', 'codex']) {
     for (const name of ['job.json', 'result.json', 'prompt.txt', 'stdout.log', 'stderr.log']) {
       assert.equal((await readFile(path.join(jobDir, name), 'utf8')).includes(TOKEN), false, name);
     }
-    if (self === 'codex') await writeFile(f.config.bridge.credentialFile, OTHER_TOKEN);
+    await writeFile(f.config.bridge.credentialFile, OTHER_TOKEN);
     const resumed = await f.ask({ sessionId: done.sessionId });
     assert.equal(f.requests.length, 2, 'resume verifies the credential again');
-    const resumeToken = self === 'codex' ? OTHER_TOKEN : TOKEN;
+    const resumeToken = OTHER_TOKEN;
     assert.equal(f.requests[1].options.headers.Authorization, `Bearer ${resumeToken}`);
     assert.equal(f.spawned[1].options.env.DSH_MCP_TOKEN, resumeToken);
     assert.equal(JSON.stringify(f.starts).includes(resumeToken), false);
@@ -324,9 +336,10 @@ test('PowerShell and ps process queries strip only bridge credentials and preser
 });
 
 test('taskkill and Codex app-server never inherit an administrator token', async (t) => {
-  const prior = process.env.DSH_MCP_TOKEN;
-  process.env.DSH_MCP_TOKEN = TOKEN;
-  t.after(() => { if (prior === undefined) delete process.env.DSH_MCP_TOKEN; else process.env.DSH_MCP_TOKEN = prior; });
+  // Substitute a plain object; never write to Node's real environment store.
+  const envDescriptor = Object.getOwnPropertyDescriptor(process, 'env');
+  Object.defineProperty(process, 'env', { ...envDescriptor, value: { ...process.env, DSH_MCP_TOKEN: TOKEN } });
+  t.after(() => Object.defineProperty(process, 'env', envDescriptor));
   const calls = [];
   const killed = defaultKillTree(123, { platform: 'win32', spawnImpl: (command, args, options) => {
     calls.push({ command, args, options });

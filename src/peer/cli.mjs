@@ -225,7 +225,8 @@ export function buildInvocation(request, peer) {
       }
       const allowed = checkToolNames(peer.delegateAllowedTools ?? [], 'delegateAllowedTools');
       // Delegate MCP uses the carrier so inherited credentials, disabled markers and
-      // via apply in both directions. The root Claude HTTP plugin stays unchanged.
+      // via apply in both directions. Root Claude also uses stdio with its own file;
+      // this strict delegate config inherits the verified root token.
       // These names preserve the plugin's existing MCP tool permission prefixes.
       const mcpConfig = { mcpServers: {
         'plugin_agent-bridge_dsh_project': {

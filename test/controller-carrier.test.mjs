@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { resolveBridgeCredential, stripBridgeCredentials } from '../src/bridge-credentials.mjs';
 import { createCarrier, defaultSpawnSidecar, resolveCarrierToken } from '../src/bridge-carrier.mjs';
+import { testDir } from './helpers/test-root.mjs';
 
 const TOKEN = 'a3-carrier-test-token-0123456789abcdef';
 const FILE_TOKEN = 'a3-carrier-file-token-0123456789abcdef';
@@ -281,10 +283,33 @@ test('Codex MCP templates forward the credential and delegation context through 
   assert.deepEqual(config.mcpServers.agent_peer.args, ['./bin/peer-mcp.mjs']);
 });
 
-test('Claude root HTTP configuration retains environment authorization without via headers', async () => {
+test('Claude root config uses file credentials for both stdio servers without token or via defaults', async () => {
   const plugin = JSON.parse(await readFile(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'));
-  const entry = plugin.mcpServers.dsh_project;
-  assert.equal(entry.type, 'http');
-  assert.equal(entry.headers.Authorization, 'Bearer ${DSH_MCP_TOKEN}');
-  assert.equal(Object.keys(entry.headers).some((key) => /^X-Agent-Bridge-/i.test(key)), false);
+  assert.equal(plugin.userConfig.bridge_credential_file.type, 'file');
+  assert.equal(plugin.userConfig.bridge_credential_file.required, true);
+  assert.equal(plugin.mcpServers.dsh_project.type, 'stdio');
+  assert.deepEqual(plugin.mcpServers.dsh_project.args, ['${CLAUDE_PLUGIN_ROOT}/bin/bridge.mjs']);
+  for (const entry of Object.values(plugin.mcpServers)) {
+    assert.equal(entry.command, '${user_config.node_path}');
+    assert.equal(entry.env.DSH_BRIDGE_CREDENTIAL_FILE, '${user_config.bridge_credential_file}');
+    assert.equal(entry.env.DSH_BRIDGE_URL, '${user_config.dsh_bridge_url}');
+    assert.equal(entry.headers, undefined);
+    assert.equal(JSON.stringify(entry).includes('DSH_MCP_TOKEN'), false);
+    assert.equal(Object.keys(entry.env).some((key) => /^(AGENT_BRIDGE_CHAIN|AGENT_BRIDGE_ROOT_TASK)$/i.test(key)), false);
+  }
+});
+
+test('both roots authenticate from file paths containing spaces and Chinese text without via', async (t) => {
+  const dir = testDir(t, 'controller-carrier');
+  for (const self of ['claude-code', 'codex']) {
+    const credentialFile = path.join(dir, `${self} 凭据 file.token`);
+    await writeFile(credentialFile, FILE_TOKEN);
+    const f = carrierHarness({ env: { DSH_BRIDGE_CREDENTIAL_FILE: credentialFile }, readFileImpl: readFile });
+    await f.carrier.handleLine(CALL);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].init.headers.Authorization, `Bearer ${FILE_TOKEN}`);
+    assert.equal(f.calls[0].init.headers['X-Agent-Bridge-Chain'], undefined);
+    assert.equal(f.calls[0].init.headers['X-Agent-Bridge-Root-Task'], undefined);
+    assert.equal(JSON.stringify({ writes: f.writes, logs: f.logs }).includes(FILE_TOKEN), false);
+  }
 });
