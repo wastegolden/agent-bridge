@@ -5,7 +5,7 @@
 // Every closed ROOT task owns:
 //   * one durable Markdown record inside its project (the file at `record.path`), and
 //   * one `record` event in `<stateDir>/records-index.jsonl` listing the raw harness
-//     sessions of that task ({harness:'dsh'|'codex'|'claude-code', id, source, revision?})
+//     sessions of that task ({harness:'dsh'|'codex'|'claude-code', id, source, revision?, submittedBy?})
 //     together with the instant its raw sessions become eligible (`eligibleAt`; null means
 //     "keep forever").
 //
@@ -14,9 +14,11 @@
 // An id is touched only after it has been validated for its harness.
 //
 // Bounds:
-//   * Sessions already recorded as 'deleted', 'archived' or 'skipped' are FINAL: they are
-//     never acted on again. A 'failed' session is retried while it has fewer than
-//     `maxAttempts` failure events in the index, then it is left alone.
+//   * Owned records require their authenticated owner. In ownerless records, local peer
+//     sessions need no bridge; DSH sessions require identity and dossier ownership.
+//     Unavailable identity, foreign ownership and unavailable clients only produce reports.
+//   * Deleted/archived sessions are final. Skipped sessions and failures exhausted after
+//     `maxAttempts` events need an explicit, reasoned retry, recorded in the index.
 //   * A session still referenced by another record that is kept (`keep: true`) or not yet
 //     due (no finite eligibleAt, or one later than now) is never acted on for an older
 //     record: it is reported 'skipped' with NOTE_SESSION_STILL_REFERENCED. Within one
@@ -31,13 +33,14 @@
 //
 // Modes:
 //   * dryRun (the default): no action API is called and nothing is written. Every action
+//     first passes the read-only identity/legacy dossier ownership checks.
 //     that would be attempted carries state 'planned'. Three determinations are local and
 //     call-free, so they keep their real outcome even in dryRun: an invalid id
 //     ('failed' / 'invalid id'), a session still referenced by a kept/not-yet-due record
 //     ('skipped' / NOTE_SESSION_STILL_REFERENCED) and a due record whose record file is
 //     missing ('skipped' / 'record file missing').
 //   * dryRun === false: each finished action appends exactly ONE `{kind:'session'}` index
-//     event immediately after it, so a crash in the middle of a sweep can never repeat a
+//     event immediately after it, except report-only deferred actions. An interrupted sweep cannot repeat a
 //     deletion that already completed.
 //
 // Harness actions:
@@ -112,6 +115,17 @@ function errorNote(error) {
 function errorCodeOf(error) {
   if (typeof error?.code === 'string' && error.code !== '') return boundNote(error.code);
   return boundNote(typeof error?.message === 'string' ? error.message : String(error));
+}
+
+/** Transport/auth/client availability does not consume a session's business retries. */
+function isUnavailable(error) {
+  const code = error?.code;
+  const bridgeCode = error?.detail?.code;
+  return code === 'PEER_BRIDGE_UNAVAILABLE'
+    || (code === 'PEER_BRIDGE' && (bridgeCode == null || ['AUTH_UNAVAILABLE', 'TASK_NOT_OWNED', 'OVERRIDE_REASON_REQUIRED'].includes(bridgeCode)))
+    || ['AUTH_UNAVAILABLE', 'TASK_NOT_OWNED', 'OVERRIDE_REASON_REQUIRED', 'PEER_CODEX_APP_SERVER_TIMEOUT',
+      'EACCES', 'EPERM', 'EBUSY', 'ENOENT', 'ENOTDIR', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
+    || (code === 'PEER_CODEX_APP_SERVER' && error?.detail?.rpcCode == null);
 }
 
 /** True when an archive error means "this task is already archived", which is success here. */
@@ -190,61 +204,24 @@ function countFailureEvents(raw) {
     } catch {
       continue;
     }
-    if (!isObject(event) || event.kind !== 'session' || event.state !== 'failed') continue;
+    if (!isObject(event) || event.kind !== 'session') continue;
     const harness = typeof event.harness === 'string' ? event.harness : '';
     const id = typeof event.id === 'string' ? event.id : '';
     const key = sessionKeyOf(event.recordId, harness, id);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (event.state === 'pending' && event.retry?.source === 'cleanup_run') counts.set(key, 0);
+    if (event.state === 'failed') counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
 }
 
 /**
- * The dsh action needs the bridge task revision, which the folded index does not carry
- * (readIndex keeps harness/id/source/state only). It is read back out of the raw `record`
- * events, keyed exactly like the folded sessions, with a later record event replacing an
- * earlier one just as the fold does.
- */
-function collectRevisions(raw) {
-  const revisions = new Map();
-  for (const line of String(raw ?? '').split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed === '') continue;
-    let event;
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (!isObject(event) || event.kind !== 'record') continue;
-    const recordId = String(event.recordId ?? '');
-    if (recordId === '') continue;
-    for (const session of Array.isArray(event.sessions) ? event.sessions : []) {
-      if (!isObject(session)) continue;
-      const harness = typeof session.harness === 'string' ? session.harness : '';
-      const id = typeof session.id === 'string' ? session.id : '';
-      const key = sessionKeyOf(recordId, harness, id);
-      if (session.revision === undefined) revisions.delete(key);
-      else revisions.set(key, session.revision);
-    }
-  }
-  return revisions;
-}
-
-/**
  * The immediate subdirectories of `claudeProjectsDir` that hold a FILE named `<id>.jsonl`.
  * Exactly one level below the root is inspected; nothing deeper is ever searched, and a
- * directory that merely has the file's name is not a session file. A missing root is zero
- * matches rather than an error.
+ * directory that merely has the file's name is not a session file. An unreadable root
+ * propagates to the report-only availability handler.
  */
 async function findClaudeSessionDirs(root, id, readdirImpl) {
-  let projects;
-  try {
-    projects = await readdirImpl(root, { withFileTypes: true });
-  } catch (error) {
-    if (isNotFound(error)) return [];
-    throw error;
-  }
+  const projects = await readdirImpl(root, { withFileTypes: true });
   const matches = [];
   for (const project of projects) {
     const projectIsDirectory = typeof project?.isDirectory === 'function' ? project.isDirectory() : true;
@@ -293,14 +270,14 @@ async function deleteCodexThread(id, deps) {
   const action = 'delete';
   const client = deps.codexThreads;
   if (client === null || client === undefined) {
-    return { action, state: 'skipped', note: NOTE_CODEX_UNAVAILABLE };
+    return { action, state: 'deferred', note: NOTE_CODEX_UNAVAILABLE };
   }
   try {
     await client.archive(id);
     await client.remove(id);
     return { action, state: 'deleted', note: null };
   } catch (error) {
-    return { action, state: 'failed', note: errorNote(error) };
+    return { action, state: isUnavailable(error) ? 'deferred' : 'failed', note: errorNote(error) };
   }
 }
 
@@ -308,9 +285,12 @@ async function deleteClaudeSession(id, deps) {
   const action = 'delete';
   const root = deps.claudeProjectsDir;
   if (root === null || root === undefined) {
-    return { action, state: 'skipped', note: NOTE_CLAUDE_DIR_UNAVAILABLE };
+    return { action, state: 'deferred', note: NOTE_CLAUDE_DIR_UNAVAILABLE };
   }
   try {
+    if (!(await isDirectoryEntry(root, deps.stat))) {
+      return { action, state: 'deferred', note: NOTE_CLAUDE_DIR_UNAVAILABLE };
+    }
     const matches = await findClaudeSessionDirs(root, id, deps.readdir);
     if (matches.length === 0) return { action, state: 'skipped', note: NOTE_CLAUDE_FILE_MISSING };
     if (matches.length > 1) return { action, state: 'failed', note: NOTE_CLAUDE_AMBIGUOUS };
@@ -322,7 +302,7 @@ async function deleteClaudeSession(id, deps) {
     }
     return { action, state: 'deleted', note: null };
   } catch (error) {
-    return { action, state: 'failed', note: errorNote(error) };
+    return { action, state: isUnavailable(error) ? 'deferred' : 'failed', note: errorNote(error) };
   }
 }
 
@@ -330,7 +310,7 @@ async function archiveDshTask(source, revision, deps) {
   const action = 'archive';
   const client = deps.bridge;
   if (client === null || client === undefined) {
-    return { action, state: 'skipped', note: NOTE_BRIDGE_UNAVAILABLE };
+    return { action, state: 'deferred', note: NOTE_BRIDGE_UNAVAILABLE };
   }
   try {
     const outcome = await client.archive(source, revision === undefined ? null : revision);
@@ -339,7 +319,7 @@ async function archiveDshTask(source, revision, deps) {
     }
   } catch (error) {
     // "Already archived" is the outcome we wanted, not a failure.
-    if (!isAlreadyArchived(error)) return { action, state: 'failed', note: errorNote(error) };
+    if (!isAlreadyArchived(error)) return { action, state: isUnavailable(error) ? 'deferred' : 'failed', note: errorNote(error) };
   }
   // The physical cleanup is a separate, tolerated step: its outcome (or the error code) is
   // reported in the note, but a cleanup failure never turns an archived session into failed.
@@ -384,18 +364,21 @@ function isActionable(state, failures, recordId, harness, id, maxAttempts) {
  * @param {object} input
  * @param {string} input.stateDir absolute directory holding records-index.jsonl
  * @param {Function} [input.now] returns epoch milliseconds (default Date.now)
- * @param {boolean} [input.dryRun] default true: plan only, call nothing, write nothing
+ * @param {boolean} [input.dryRun] default true: read identity/ownership, plan actions, write nothing
  * @param {object|null} [input.codexThreads] createCodexThreadClient result (never closed here)
- * @param {object|null} [input.bridge] `{archive(source, revision), cleanup(source, {dryRun})}`
+ * @param {object|null} [input.bridge] client with controllerIdentity/dossier/archive/cleanup
+ * @param {object|null} [input.retry] explicit {recordIds: string[], reason: string} recovery
+ *   of exhausted failures or historical skipped entries; dryRun only previews recovery
  * @param {string|null} [input.claudeProjectsDir] root whose immediate subdirectories hold
  *   `<sessionId>.jsonl` files
  * @param {number} [input.maxAttempts] failed attempts allowed before a session is left alone
  * @param {object} [input.fsImpl] optional node:fs/promises overrides
  *   ({readFile, readdir, rm, stat, mkdir, appendFile})
- * @returns {Promise<{dryRun: boolean, checked: number, due: number, actions: Array<object>}>}
+ * @returns {Promise<{dryRun: boolean, checked: number, due: number, actions: Array<object>, retries: Array<object>, deferred: Array<object>}>}
  *   `checked` is the number of records in the index; `due` is the number whose retention
  *   window has arrived (a due record whose record file is missing still yields 'skip'
- *   actions); each action is `{recordId, harness, id, action, state, note}`.
+ *   actions); each action is `{recordId, harness, id, action, state, note}`. `deferred`
+ *   reports ownership/identity gates, and `retries` reports explicit recovery audits.
  */
 export async function sweepRecords({
   stateDir,
@@ -405,6 +388,7 @@ export async function sweepRecords({
   bridge = null,
   claudeProjectsDir = null,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
+  retry = null,
   fsImpl = {},
 } = {}) {
   if (typeof stateDir !== 'string' || stateDir === '' || !path.isAbsolute(stateDir)) {
@@ -416,6 +400,14 @@ export async function sweepRecords({
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new PeerPolicyError(ARGS_CODE, 'maxAttempts must be a positive integer', { field: 'maxAttempts' });
   }
+  if (retry !== null && (!isObject(retry)
+    || Object.keys(retry).some((key) => !['recordIds', 'reason'].includes(key))
+    || !Array.isArray(retry.recordIds) || retry.recordIds.length < 1 || retry.recordIds.length > 100
+    || retry.recordIds.some((id) => typeof id !== 'string' || id.trim() === '' || id.length > 128)
+    || typeof retry.reason !== 'string' || retry.reason.trim() === '' || retry.reason.length > 500)) {
+    throw new PeerPolicyError(ARGS_CODE, 'retry needs 1–100 recordIds and a nonblank reason of at most 500 characters', { field: 'retry' });
+  }
+  const retryRecordIds = new Set(retry?.recordIds ?? []);
   const overrides = isObject(fsImpl) ? fsImpl : {};
   const deps = {
     readFile: typeof overrides.readFile === 'function' ? overrides.readFile : readFile,
@@ -431,7 +423,7 @@ export async function sweepRecords({
   };
 
   // Fold the index through readIndex and capture the same bytes in passing: the raw event
-  // stream is needed for the failure counts and for the dsh revisions the fold drops.
+  // stream is needed for the failure counts, including explicit retry resets.
   const indexPath = path.join(stateDir, INDEX_FILE);
   let rawIndex = '';
   const capturingRead = async (target, encoding) => {
@@ -441,12 +433,30 @@ export async function sweepRecords({
   };
   const index = await readIndex(stateDir, { readFile: capturingRead });
   const failures = countFailureEvents(rawIndex);
-  const revisions = collectRevisions(rawIndex);
 
   const isDryRun = Boolean(dryRun);
   const at = now();
   const actions = [];
+  const retries = [];
+  const deferred = [];
   let due = 0;
+
+  // Only owned records and DSH sessions depend on a bridge principal. A bridge outage
+  // must still allow ownerless local sessions to progress, including in mixed records.
+  let identity = null;
+  let identityNote = null;
+  const needsIdentity = [...index.values()].some((record) => record.owner != null
+    || [...record.sessions.values()].some((session) => session.harness === DSH));
+  if (needsIdentity) {
+    try {
+      if (typeof bridge?.controllerIdentity !== 'function') {
+        throw new PeerPolicyError('PEER_BRIDGE_UNAVAILABLE', 'bridge identity unavailable');
+      }
+      identity = await bridge.controllerIdentity();
+    } catch (error) {
+      identityNote = errorNote(error);
+    }
+  }
 
   // A session can be shared by several records (a follow-up round reuses the harness
   // session of the round before it). BEFORE any due record acts, collect every session
@@ -467,6 +477,12 @@ export async function sweepRecords({
   const handledThisSweep = new Set();
 
   for (const record of index.values()) {
+    // Preserve all records in the global reference set above, including foreign ones.
+    // Only an authenticated owner may produce outcomes/events for an owned record.
+    if (record.owner != null && record.owner !== identity?.self) {
+      deferred.push({ recordId: record.recordId, note: identityNote ?? 'record owned by another controller' });
+      continue;
+    }
     const eligibleAt = record.eligibleAt;
     if (typeof eligibleAt !== 'number' || !Number.isFinite(eligibleAt)) continue;
     if (eligibleAt > at) continue;
@@ -476,15 +492,58 @@ export async function sweepRecords({
     due += 1;
     const recordId = record.recordId === null || record.recordId === undefined ? '' : String(record.recordId);
     const recordPath = typeof record.path === 'string' && record.path !== '' ? record.path : null;
-    const recordFileExists = recordPath !== null && (await entryExists(recordPath, deps.stat));
+    let recordFileExists;
 
     for (const session of record.sessions.values()) {
       const harness = typeof session.harness === 'string' ? session.harness : '';
       const id = typeof session.id === 'string' ? session.id : '';
       const source = typeof session.source === 'string' ? session.source : '';
-      if (!isActionable(session.state, failures, recordId, harness, id, deps.maxAttempts)) continue;
+      const key = sessionKeyOf(recordId, harness, id);
+      const failureCount = failures.get(key) ?? 0;
+      const recover = retryRecordIds.has(recordId)
+        && (session.state === 'skipped' || (session.state === 'failed' && failureCount >= maxAttempts));
+      if (!recover && !isActionable(session.state, failures, recordId, harness, id, deps.maxAttempts)) continue;
+
+      // Historical DSH sessions have no recorded principal. Read their dossier before
+      // reference guards, missing-record outcomes or retry events can change the index.
+      if (harness === DSH) {
+        if (identity === null) {
+          deferred.push({ recordId, harness, id, note: identityNote });
+          continue;
+        }
+        let submittedBy = session.submittedBy;
+        if (record.owner == null || !Object.hasOwn(session, 'submittedBy')) {
+          if (!isDshSource(source)) {
+            deferred.push({ recordId, harness, id, note: NOTE_INVALID_ID });
+            continue;
+          }
+          try {
+            submittedBy = (await bridge.dossier(source))?.submittedBy ?? null;
+          } catch (error) {
+            deferred.push({ recordId, harness, id, note: errorNote(error) });
+            continue;
+          }
+        }
+        if (submittedBy !== identity.self) {
+          deferred.push({ recordId, harness, id, note: submittedBy == null ? 'task owner unknown; operator action required' : 'task owned by another controller' });
+          continue;
+        }
+      }
+
+      if (recover) {
+        const audit = { source: 'cleanup_run', controller: identity?.self ?? null, reason: retry.reason,
+          previousState: session.state, previousFailures: failureCount };
+        retries.push({ recordId, harness, id, state: isDryRun ? 'planned' : 'pending', ...audit });
+        if (!isDryRun) {
+          await appendIndexEvent(stateDir, {
+            kind: 'session', recordId, harness, id, state: 'pending', note: retry.reason, retry: audit,
+          }, { now, mkdir: deps.mkdir, appendFile: deps.appendFile });
+        }
+        failures.set(key, 0);
+      }
 
       const refKey = sessionRefKey(harness, id);
+      if (recordFileExists === undefined) recordFileExists = recordPath !== null && (await entryExists(recordPath, deps.stat));
       let outcome;
       if (stillReferenced.has(refKey) || handledThisSweep.has(refKey)) {
         // Either a kept/not-yet-due record still owns this session, or another due
@@ -497,11 +556,11 @@ export async function sweepRecords({
           harness,
           id,
           source,
-          revision: revisions.get(sessionKeyOf(recordId, harness, id)),
+          revision: session.revision,
           dryRun: isDryRun,
           deps,
         });
-        handledThisSweep.add(refKey);
+        if (outcome.state !== 'deferred') handledThisSweep.add(refKey);
       }
       actions.push({
         recordId,
@@ -513,7 +572,7 @@ export async function sweepRecords({
       });
       // In dryRun nothing is written. Otherwise the event lands straight away, so an
       // interrupted sweep never repeats an action that already finished.
-      if (!isDryRun) {
+      if (!isDryRun && outcome.state !== 'deferred') {
         await appendIndexEvent(stateDir, {
           kind: 'session',
           recordId,
@@ -526,5 +585,5 @@ export async function sweepRecords({
     }
   }
 
-  return { dryRun: isDryRun, checked: index.size, due, actions };
+  return { dryRun: isDryRun, checked: index.size, due, actions, retries, deferred };
 }

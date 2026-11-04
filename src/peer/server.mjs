@@ -125,7 +125,17 @@ export function peerTools(limits) {
       ['title', 'outcome', 'conclusion'],
     ),
     tool('record_list', 'List the durable accepted-result records known to the index, newest first by closedAt.', { limit: int('Maximum records.', { minimum: 1, maximum: 200 }) }),
-    tool('cleanup_run', 'Sweep the raw sessions of closed records whose retention window has arrived. dryRun (the default) plans every action and changes nothing.', { dryRun: { type: 'boolean', description: 'Default true: plan only, call nothing, write nothing.' } }),
+    tool('cleanup_run', 'Sweep recorded raw sessions whose retention window has arrived. Owned records and DSH sessions require verified identity; ownerless local sessions need no bridge. Unavailability is reported without finalizing affected entries. dryRun (the default) plans without mutations.', {
+      dryRun: { type: 'boolean', description: 'Default true: read identity/ownership, plan actions, write nothing.' },
+      retry: {
+        type: 'object', additionalProperties: false, required: ['recordIds', 'reason'],
+        description: 'Explicitly reopen exhausted failures or skipped sessions in these due records; audit authenticated actor when available, source and reason. Ownership, retention and reference protections still apply.',
+        properties: {
+          recordIds: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', minLength: 1, maxLength: 128 } },
+          reason: str('Reason for retry, retained in the append-only index audit.', { minLength: 1, maxLength: 500 }),
+        },
+      },
+    }),
   ];
 }
 
@@ -160,6 +170,7 @@ function validateArgs(spec, args) {
     const ok =
       schema.type === 'integer' ? Number.isSafeInteger(value) && (schema.minimum === undefined || value >= schema.minimum) && (schema.maximum === undefined || value <= schema.maximum)
         : schema.type === 'boolean' ? typeof value === 'boolean'
+          : schema.type === 'object' ? isPlainObject(value)
           : schema.type === 'array' ? Array.isArray(value) && (schema.items?.type === 'object'
             ? value.every((item) => isPlainObject(item))
             : value.every((item) => typeof item === 'string' && (schema.items?.pattern === undefined || new RegExp(schema.items.pattern).test(item))))
@@ -494,6 +505,7 @@ export function createPeerServer({
       .slice(0, args.limit ?? 20)
       .map((record) => ({
         recordId: record.recordId ?? null,
+        owner: record.owner ?? null,
         title: record.title ?? null,
         rootTask: record.rootTask ?? null,
         path: record.path ?? null,
@@ -505,13 +517,15 @@ export function createPeerServer({
           harness: session.harness ?? null,
           id: session.id ?? null,
           state: session.state ?? null,
+          ...(Object.hasOwn(session, 'submittedBy') ? { submittedBy: session.submittedBy } : {}),
+          ...(session.retry ? { retry: session.retry } : {}),
         })),
       }));
     return { records };
   }
 
   /** Run one retention sweep with the clients this server owns (never overlaps). */
-  async function runSweepNow(dryRun) {
+  async function runSweepNow(dryRun, retry) {
     let codexThreads = null;
     if (typeof resolvedCodexThreadsFactory === 'function') {
       try {
@@ -526,6 +540,7 @@ export function createPeerServer({
         stateDir: config.stateDir,
         now,
         dryRun,
+        retry,
         codexThreads,
         bridge: resolvedBridgeClient ?? null,
         claudeProjectsDir: config.records?.claudeProjectsDir ?? null,
@@ -540,7 +555,7 @@ export function createPeerServer({
   }
 
   /** One sweep at a time: a second request waits for the running sweep, timer ticks skip. */
-  function runSweep(dryRun) {
+  function runSweep(dryRun, retry = null) {
     const previous = sweepInFlight;
     const promise = (async () => {
       if (previous) {
@@ -550,7 +565,7 @@ export function createPeerServer({
           // the earlier sweep's failure belongs to its own caller
         }
       }
-      return runSweepNow(dryRun);
+      return runSweepNow(dryRun, retry);
     })();
     sweepInFlight = promise;
     const settled = () => { if (sweepInFlight === promise) sweepInFlight = null; };
@@ -560,7 +575,7 @@ export function createPeerServer({
 
   async function cleanupRun(args) {
     await requireReady();
-    return runSweep(args.dryRun ?? true);
+    return runSweep(args.dryRun ?? true, args.retry ?? null);
   }
 
   /** Retention sweep timers: unref'd, never overlapping, cleared by close(). */
