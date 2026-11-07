@@ -882,9 +882,11 @@ export async function applyInstall(plan) {
         });
       }
       if (step.action === 'unchanged' || step.action === 'adopt') continue;
-      if (current.exists && step.previous?.existed !== true) {
+      if (current.exists && step.targetSha256Before === null) {
         // A file we believed absent now exists: only reachable through the
-        // concurrent-change check above, kept as a defensive guard.
+        // concurrent-change check above, kept as a defensive guard. A file this
+        // installer created earlier and now replaces keeps previous.existed=false
+        // (uninstall removes it), so that flag cannot decide "unexpected" here.
         fail('E_CONCURRENT_CHANGE', `unexpected existing target file: ${step.rel}`);
       }
       if (current.exists) {

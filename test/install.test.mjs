@@ -375,6 +375,27 @@ test('reinstall removes stale owned files that left the source', async (t) => {
   assert.equal(await exists(legacyAbs), false, 'stale owned file must be removed on upgrade');
 });
 
+test('reinstall upgrades an owned file whose content changed, and uninstall rolls it back', async (t) => {
+  const sandbox = await makeSandbox();
+  t.after(() => cleanup(sandbox));
+  const profileDir = path.join(sandbox, 'profile');
+  await makeProfileMetadata(profileDir);
+  const sourceDir = await makeSource(sandbox, { 'src/feature.mjs': 'export const version = 1;\n' });
+  await install(opts(sandbox, profileDir, sourceDir));
+  const featureAbs = path.join(profileDir, 'node_modules', '@local', 'dsh-codex-bridge-v1', 'src', 'feature.mjs');
+  assert.equal(await fsp.readFile(featureAbs, 'utf8'), 'export const version = 1;\n');
+
+  await fsp.writeFile(path.join(sourceDir, 'src', 'feature.mjs'), 'export const version = 2;\n');
+  const report = await install(opts(sandbox, profileDir, sourceDir));
+  assert.equal(report.ok, true, 'upgrading an owned file must not be refused as a concurrent change');
+  assert.equal(await fsp.readFile(featureAbs, 'utf8'), 'export const version = 2;\n');
+
+  // Uninstall restores the state before the most recent install: the upgraded file goes
+  // back to the version the first install wrote (its bytes were backed up on replace).
+  assert.equal((await uninstall(uopts(sandbox, profileDir))).ok, true);
+  assert.equal(await fsp.readFile(featureAbs, 'utf8'), 'export const version = 1;\n');
+});
+
 // ---------------------------------------------------------------------------
 // Uninstall: backup/restore and conflicts
 // ---------------------------------------------------------------------------
