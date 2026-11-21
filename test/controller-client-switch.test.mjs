@@ -33,7 +33,7 @@ async function fixture(t) {
   await put(path.join(sourceDir, 'src/runtime.mjs'), '// current runtime');
   await put(path.join(sourceDir, 'skills/example/SKILL.md'), 'current skill');
   await put(path.join(sourceDir, 'dsh-host/index.cjs'), '// current host entry');
-  await put(path.join(sourceDir, 'package.json'), { name: 'agent-bridge', version: '2.1.0' });
+  await put(path.join(sourceDir, 'package.json'), { name: 'agent-bridge', version: '2.1.1' });
   const oldManifest = structuredClone(template);
   oldManifest.mcpServers.dsh_project = { type: 'http', url: 'http://127.0.0.1:1/old', headers: { Authorization: `Bearer ${LEGACY}` } };
   oldManifest.mcpServers.agent_peer.env = { KEEP_ENV: 'keep', dsh_mcp_token: LEGACY, AGENT_BRIDGE_CHAIN: 'old-root' };
@@ -181,6 +181,23 @@ test('a directory marketplace source the Claude app loads directly is switched a
   assert.equal(await stat(path.join(claudeSource, 'src/runtime.mjs')).catch(() => null), null);
 });
 
+test('client switching accepts the repository marketplace entry rooted at ./', async (t) => {
+  const f = await fixture(t);
+  const catalog = JSON.parse(await readFile(new URL('../.claude-plugin/marketplace.json', import.meta.url), 'utf8'));
+  await f.put(path.join(f.claudeDir, '.claude-plugin/marketplace.json'), catalog);
+  const id = `agent-bridge@${catalog.name}`;
+  f.config.claudePluginId = id;
+  const settings = JSON.parse(await readFile(f.settingsPath, 'utf8'));
+  settings.enabledPlugins[id] = true;
+  settings.extraKnownMarketplaces = { [catalog.name]: { source: { source: 'directory', path: f.claudeDir } } };
+  await f.put(f.settingsPath, settings);
+  await f.put(path.join(f.options.claudeHome, 'plugins/installed_plugins.json'), {
+    plugins: { [id]: [{ scope: 'user', installPath: f.claudeDir }] },
+  });
+  const plan = await planClientSwitch(f.config, f.options);
+  assert.equal(plan.locations.claudeSourceDir, f.claudeDir);
+});
+
 test('a directory marketplace entry that escapes the marketplace or is ambiguous is refused before any change', async (t) => {
   for (const plugins of [[{ name: 'agent-bridge', source: '../outside' }], [{ name: 'agent-bridge', source: './a' }, { name: 'agent-bridge', source: './b' }], [{ name: 'agent-bridge', source: { source: 'github', repo: 'x/y' } }]]) {
     const f = await fixture(t);
@@ -312,7 +329,7 @@ test('ambiguous Codex caches require an explicit installed path and older instal
   await f.put(manifestPath, manifest);
   const options = { ...f.options, codexCacheDir: f.codexDir, dryRun: false };
   const result = await switchClients(options, f.deps);
-  assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '2.1.0');
+  assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '2.1.1');
   assert.equal(await readFile(path.join(f.claudeDir, 'src/runtime.mjs'), 'utf8'), '// current runtime');
   await switchClients({ rollback: result.backupDirectory, dryRun: false }, f.deps);
   assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '1.7.0');

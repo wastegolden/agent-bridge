@@ -43,10 +43,9 @@
 //   launch-claude-code.mjs / launch-codex.mjs                  (root launch wrappers; + antigravity when configured; no token inside)
 // Those are deployment artifacts only; no token content is ever written into a config.
 //
-// First install: files that are machine-specific are created only when missing and never
-// overwritten — the Claude marketplace, the agent-peer configs, the Codex plugin's
-// .mcp.json and the Codex marketplace entry. In identity mode an existing old Codex
-// .mcp.json is migrated to the A3 stdio carrier shape instead of keeping HTTP/shared-token.
+// Full deployment adds missing Antigravity settings to existing peer configs when opted in.
+// Preparation preserves active configs. Identity deployments migrate the Codex .mcp.json
+// to the A3 stdio carrier.
 //
 // Why defaults are patched: a plugin host may not apply stored userConfig values to
 // every session (the Claude desktop app started the servers with the literal default
@@ -65,9 +64,11 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 import { isAbsoluteLocalPath, loadControllerRegistry } from '../src/controller-auth.mjs';
 import { stripBridgeCredentials } from '../src/bridge-credentials.mjs';
+import { writeFileAtomic } from './install.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = path.resolve(HERE, '..');
@@ -333,9 +334,6 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
     disputedRetainDays: 30,
     sweepIntervalMinutes: 60,
     claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')),
-    ...(hasAntigravity(config) || config.antigravityDataDir
-      ? { antigravityDataDir: slash(config.antigravityDataDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli')) }
-      : {}),
   };
   const base = files.shared === null
     ? {
@@ -349,8 +347,6 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   base.stateDir = slash(stateDir);
   if (!isPlainObject(base.peers)) throw new Error(`deploy config: existing peer config has an invalid peers field: ${layout.peerConfigPath}`);
   if (!isPlainObject(base.records)) base.records = defaultRecords;
-  else if (config.antigravityDataDir) base.records.antigravityDataDir = slash(config.antigravityDataDir);
-  else if (hasAntigravity(config) && base.records.antigravityDataDir === undefined) base.records.antigravityDataDir = slash(path.join(os.homedir(), '.gemini', 'antigravity-cli'));
   if (!isPlainObject(base.limits)) base.limits = { timeoutMs: 1800000, maxConcurrentJobs: 3 };
   if (config.codexExecutable) {
     base.peers.codex = { ...(isPlainObject(base.peers.codex) ? base.peers.codex : {}), executable: slash(config.codexExecutable), delegateSandbox: 'workspace-write', readOnlyDisablePlugins: [config.codexPluginId ?? 'agent-bridge@personal'], threadSection: 'Agent Bridge', threadNamePrefix: '[agent-bridge]' };
@@ -358,21 +354,12 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   if (config.claudeExecutable) {
     base.peers['claude-code'] = { ...(isPlainObject(base.peers['claude-code']) ? base.peers['claude-code'] : {}), executable: slash(config.claudeExecutable), delegatePermissionMode: 'acceptEdits', delegateAllowedTools: ['mcp__plugin_agent-bridge_dsh_project', 'mcp__plugin_agent-bridge_agent_peer', 'Bash'] };
   }
+  // New root configs use the deployment's paths even when based on an older shared file.
   if (config.antigravityExecutable) {
-    const existingAgy = isPlainObject(base.peers.antigravity) ? base.peers.antigravity : {};
-    base.peers.antigravity = {
-      ...existingAgy,
-      executable: slash(config.antigravityExecutable),
-      delegateMode: existingAgy.delegateMode ?? 'accept-edits',
-      ...(config.antigravityPluginDir
-        ? {
-            readOnlyAgent: existingAgy.readOnlyAgent ?? 'agent-bridge-readonly',
-            readOnlyWebAgent: existingAgy.readOnlyWebAgent ?? 'agent-bridge-readonly-web',
-          }
-        : {}),
-      delegateAllowedPermissions: existingAgy.delegateAllowedPermissions ?? ['mcp(agent-bridge_dsh_project/*)', 'mcp(agent-bridge_agent_peer/*)'],
-    };
+    base.peers.antigravity = { ...base.peers.antigravity, executable: slash(config.antigravityExecutable) };
   }
+  if (config.antigravityDataDir) base.records.antigravityDataDir = slash(config.antigravityDataDir);
+  addMissingAntigravitySettings(base, config);
 
   for (const id of peerIds) {
     const existing = files[id];
@@ -388,24 +375,37 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   return { stateDir, base, files };
 }
 
-async function writePeerConfigs(config, layout, plan, dryRun, step) {
-  const peerIds = Object.keys(layout.peerFiles);
-  if (dryRun) {
-    for (const id of peerIds) if (plan.files[id] === null) step(`would create ${id} root peer config ${layout.peerFiles[id]}`);
-    return;
-  }
-  for (const id of peerIds) {
-    if (plan.files[id] !== null) continue;
-    await mkdir(path.dirname(layout.peerFiles[id]), { recursive: true });
-    await mkdir(plan.stateDir, { recursive: true });
-    const value = {
-      ...structuredClone(plan.base),
-      // The bridge URL comes from the deploy config, not from a stale shared block.
-      bridge: { url: config.bridgeUrl, credentialFile: slash(layout.tokenFiles[id]) },
+function addMissingAntigravitySettings(value, config) {
+  if (config.antigravityExecutable) {
+    value.peers.antigravity = {
+      executable: slash(config.antigravityExecutable),
+      delegateMode: 'accept-edits',
+      ...(config.antigravityPluginDir
+        ? { readOnlyAgent: 'agent-bridge-readonly', readOnlyWebAgent: 'agent-bridge-readonly-web' }
+        : {}),
+      delegateAllowedPermissions: ['mcp(agent-bridge_dsh_project/*)', 'mcp(agent-bridge_agent_peer/*)'],
+      ...value.peers.antigravity,
     };
-    await writeFile(layout.peerFiles[id], `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    step(`created ${id} root peer config ${layout.peerFiles[id]}`);
   }
+  if (hasAntigravity(config) || config.antigravityDataDir) {
+    value.records ??= {};
+    value.records.antigravityDataDir ??= slash(config.antigravityDataDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli'));
+  }
+}
+
+async function writePeerConfig(config, file, existing, defaults, dryRun, step) {
+  const value = existing === null ? defaults : structuredClone(existing);
+  if (existing !== null) addMissingAntigravitySettings(value, config);
+  if (isDeepStrictEqual(value, existing)) return;
+  if (!dryRun) {
+    if (existing === null) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await mkdir(value.stateDir, { recursive: true });
+    }
+    const mode = existing === null ? undefined : (await stat(file)).mode;
+    await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`, { mode });
+  }
+  step(`${existing === null ? 'created' : 'updated'} peer config ${file}`);
 }
 
 function codexMcpValue(template, config, pluginDir, codexPeerConfig) {
@@ -697,7 +697,12 @@ export async function deploy(options = {}) {
   // ── 2. controller identity (tokens, peer configs, host fragments, launchers) ─
   if (layout !== null) {
     await applyIdentity(layout, identityInspection, dryRun);
-    await writePeerConfigs(config, layout, peerPlan, dryRun, step);
+    for (const [id, file] of Object.entries(layout.peerFiles)) {
+      const existing = peerPlan.files[id];
+      if (prepareOnly && existing !== null) continue;
+      const defaults = { ...peerPlan.base, bridge: { url: config.bridgeUrl, credentialFile: slash(layout.tokenFiles[id]) } };
+      await writePeerConfig(config, file, existing, defaults, dryRun, step);
+    }
     const overlap = hostFragment(layout, layout.legacyTokenFile !== null);
     const final = hostFragment(layout, false);
     if (!dryRun) {
@@ -735,20 +740,10 @@ export async function deploy(options = {}) {
   }
 
   const peerConfigPath = layout?.peerConfigPath ?? (config.peerConfig ?? path.join(config.deployRoot, 'config', 'agent-peer.json'));
-  if (layout === null && !(await exists(peerConfigPath))) {
+  if (layout === null && (hasAntigravity(config) || config.antigravityDataDir || !(await exists(peerConfigPath)))) {
     const peers = {};
     if (config.codexExecutable) peers.codex = { executable: slash(config.codexExecutable), delegateSandbox: 'workspace-write', readOnlyDisablePlugins: [config.codexPluginId ?? 'agent-bridge@personal'], threadSection: 'Agent Bridge', threadNamePrefix: '[agent-bridge]' };
     if (config.claudeExecutable) peers['claude-code'] = { executable: slash(config.claudeExecutable), delegatePermissionMode: 'acceptEdits', delegateAllowedTools: ['mcp__plugin_agent-bridge_dsh_project', 'mcp__plugin_agent-bridge_agent_peer', 'Bash'] };
-    if (config.antigravityExecutable) {
-      peers.antigravity = {
-        executable: slash(config.antigravityExecutable),
-        delegateMode: 'accept-edits',
-        ...(config.antigravityPluginDir
-          ? { readOnlyAgent: 'agent-bridge-readonly', readOnlyWebAgent: 'agent-bridge-readonly-web' }
-          : {}),
-        delegateAllowedPermissions: ['mcp(agent-bridge_dsh_project/*)', 'mcp(agent-bridge_agent_peer/*)'],
-      };
-    }
     const peerConfig = {
       schemaVersion: 1,
       stateDir: slash(path.join(config.deployRoot, 'state')),
@@ -760,19 +755,13 @@ export async function deploy(options = {}) {
         disputedRetainDays: 30,
         sweepIntervalMinutes: 60,
         claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')),
-        ...(hasAntigravity(config) || config.antigravityDataDir
-          ? { antigravityDataDir: slash(config.antigravityDataDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli')) }
-          : {}),
       },
       bridge: { url: config.bridgeUrl, ...(config.credentialFile ? { credentialFile: slash(config.credentialFile) } : {}) },
       limits: { timeoutMs: 1800000, maxConcurrentJobs: 3 },
     };
-    if (!dryRun) {
-      await mkdir(path.dirname(peerConfigPath), { recursive: true });
-      await mkdir(path.join(config.deployRoot, 'state'), { recursive: true });
-      await writeJson(peerConfigPath, peerConfig);
-    }
-    step(`created agent-peer config ${peerConfigPath} (peers: ${Object.keys(peers).join(', ') || 'none'})`);
+    const existing = await readJsonIfExists(peerConfigPath, 'peer config');
+    if (existing === null) addMissingAntigravitySettings(peerConfig, config);
+    await writePeerConfig(config, peerConfigPath, existing, peerConfig, dryRun, step);
   }
 
   // ── 4. Codex ────────────────────────────────────────────────────────────────

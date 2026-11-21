@@ -809,9 +809,9 @@ async function copyFileInto(sourceAbs, targetAbs) {
   await fsp.copyFile(sourceAbs, targetAbs);
 }
 
-export async function writeFileAtomic(abs, contents) {
+export async function writeFileAtomic(abs, contents, options) {
   const tmp = `${abs}.tmp-${randomBytes(4).toString('hex')}`;
-  await fsp.writeFile(tmp, contents);
+  await fsp.writeFile(tmp, contents, options);
   await fsp.rename(tmp, abs);
 }
 

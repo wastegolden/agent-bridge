@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { parseViaHeaders, loadControllerRegistry } from '../src/controller-auth.mjs';
@@ -363,6 +365,36 @@ test('parseAntigravityOutput and formatAntigravityInput handle success, error an
 
 // --- 5. End-to-end peer server (bidirectional) --------------------------------
 
+test('Antigravity keeps the final result after more than 16 MiB of streamed events', async (t) => {
+  const cwd = testDir(t, 'agy-long-stream');
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  const jobs = createPeerJobs({ stateDir: cwd, lineage: false, spawnImpl: () => child });
+  t.after(() => jobs.close());
+  const plan = planPeerCall(readChainContext({ AGENT_BRIDGE_SELF: 'codex' }), { target: 'antigravity', mode: 'review' });
+  const { jobId } = jobs.allocate();
+  const invocation = buildInvocation({ target: plan.target, mode: plan.mode, cwd }, { executable: process.execPath });
+  await jobs.start({ jobId, invocation, plan, prompt: 'inspect', cwd, timeoutMs: 20_000 });
+
+  child.stdout.write('{"event":"init","conversation_id":"from-first-event"}\n');
+  const update = JSON.stringify({ event: 'step_update', text: 'x'.repeat(64 * 1024) }) + '\n';
+  for (let i = 0; i < 256; i++) child.stdout.write(update);
+  const last = Buffer.from(JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: '完成', usage: { total_tokens: 123 } } }));
+  const split = last.indexOf('完') + 1;
+  const ended = once(child.stdout, 'end');
+  child.stdout.write(last.subarray(0, split));
+  child.stdout.end(last.subarray(split)); // A split UTF-8 character and no final newline.
+  await ended;
+  child.emit('close', 0, null);
+  const job = await jobs.wait(jobId, 10_000);
+  assert.equal(job.status, 'completed', JSON.stringify(job.errors));
+  assert.equal(job.sessionId, 'from-first-event');
+  assert.equal(job.usage.total_tokens, 123);
+  assert.equal((await jobs.result(jobId)).finalMessage, '完成');
+  const stored = JSON.parse(await readFile(path.join(cwd, 'jobs', jobId, 'result.json'), 'utf8'));
+  assert.deepEqual(stored.eventCounts, { init: 1, step_update: 256, result: 1 });
+});
+
 test('bidirectional peer server: claude-code <-> antigravity, webSearch toggle, session resume and delegate token', async (t) => {
   const root = testDir(t, 'antigravity-server');
   const stateDir = path.join(root, 'state');
@@ -610,6 +642,54 @@ test('sweepRecords deletes Antigravity sessions safely (brain/lock/wal/shm befor
 });
 
 // --- 7. Deployment (opt-in Antigravity plugin + identity artifacts) -----------
+
+for (const identityMode of [true, false]) {
+  test(`Antigravity upgrade preserves existing ${identityMode ? 'per-root' : 'shared'} peer settings and enables both callers`, async (t) => {
+    const root = testDir(t, 'agy-upgrade');
+    const config = {
+      deployRoot: path.join(root, 'deploy'), nodePath: process.execPath,
+      bridgeUrl: 'http://127.0.0.1:3080/mcp/test', codexExecutable: process.execPath, claudeExecutable: process.execPath,
+      ...(identityMode ? { identity: { credentialDirectory: path.join(root, 'creds'), migrationBackupDirectory: path.join(root, 'backups') } } : {}),
+    };
+    const options = { config, packageRoot: REPO, spawnImpl: () => ({ status: 0, stdout: '' }), stdout: () => {}, stderr: () => {} };
+    await deploy(options);
+    const shared = path.join(config.deployRoot, 'config', 'agent-peer.json');
+    const files = identityMode ? identityLayout(config).peerFiles : { claude: shared, codex: shared };
+    const before = new Map();
+    for (const file of new Set(Object.values(files))) {
+      const old = JSON.parse(await readFile(file, 'utf8'));
+      old.peers.codex.model = 'custom-model';
+      old.records.retainDays = 14;
+      before.set(file, old);
+      await writeFile(file, JSON.stringify(old));
+    }
+    Object.assign(config, { antigravityExecutable: process.execPath, antigravityPluginDir: path.join(root, 'plugin-agy'), antigravityDataDir: path.join(root, 'agy-data') });
+    await deploy({ ...options, dryRun: true });
+    for (const [file, old] of before) assert.equal(await readFile(file, 'utf8'), JSON.stringify(old));
+    await deploy(options);
+    for (const [id, file] of Object.entries(files)) {
+      const value = JSON.parse(await readFile(file, 'utf8'));
+      const server = createPeerServer({ env: { AGENT_BRIDGE_SELF: id === 'claude' ? 'claude-code' : 'codex' }, config: normalizePeerConfig(value), startSweepTimer: false });
+      t.after(() => server.close());
+      const caps = await rpc(server, 'peer_capabilities', {});
+      assert.equal(caps.peers.antigravity.modes.review.allowed, true);
+      assert.equal(caps.peers.antigravity.webSearchControl, true);
+      assert.equal(path.resolve(value.records.antigravityDataDir), config.antigravityDataDir);
+      const originalFields = structuredClone(value);
+      delete originalFields.peers.antigravity;
+      delete originalFields.records.antigravityDataDir;
+      assert.deepEqual(originalFields, before.get(file));
+    }
+    // Re-deployment preserves both an explicit opt-out and the operator's file formatting.
+    const custom = JSON.parse(await readFile(files.codex, 'utf8'));
+    custom.peers.antigravity.enabled = false;
+    custom.peers.antigravity.readOnlyWebAgent = 'local-web';
+    custom.records.antigravityDataDir = path.join(root, 'custom-data');
+    await writeFile(files.codex, JSON.stringify(custom));
+    await deploy(options);
+    assert.equal(await readFile(files.codex, 'utf8'), JSON.stringify(custom));
+  });
+}
 
 test('deploy-local.mjs deploys Antigravity plugin, 4th identity token, peer config, launcher and validates plugin', async (t) => {
   const sandbox = testDir(t, 'antigravity-deploy');
