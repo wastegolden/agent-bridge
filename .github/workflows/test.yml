@@ -13,10 +13,6 @@ jobs:
     # PowerShell CIM there and `ps` elsewhere.
     runs-on: windows-latest
     timeout-minutes: 20
-    # Tests put temporary files under BRIDGE_TEST_TMP (test/helpers/test-root.mjs); the
-    # local layout under F:/temp does not exist on hosted runners.
-    env:
-      BRIDGE_TEST_TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,4 +29,9 @@ jobs:
         shell: powershell
         run: Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress | Out-Null
       - name: Test
+        # Tests put temporary files under BRIDGE_TEST_TMP (test/helpers/test-root.mjs); the
+        # local layout under F:/temp does not exist on hosted runners. The runner context
+        # is only available at step level, not in job-level env.
+        env:
+          BRIDGE_TEST_TMP: ${{ runner.temp }}
         run: node --test --test-concurrency=2 test/*.test.mjs
