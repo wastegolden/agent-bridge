@@ -458,16 +458,16 @@ export function parseClaudeOutput(stdoutText) {
 }
 
 /** Parse `agy --output-format stream-json` NDJSON. Unknown event types are counted, never guessed. */
-export function parseAntigravityOutput(stdoutText) {
+export function createAntigravityOutputParser() {
   const result = { sessionId: null, finalMessage: null, usage: null, errors: [], eventCounts: {}, unparsedLines: 0, numTurns: null };
   let sawResult = false;
-  for (const raw of String(stdoutText ?? '').split(/\r?\n/)) {
+  function acceptLine(raw) {
     const line = raw.trim();
-    if (!line) continue;
+    if (!line) return;
     const event = safeJson(line);
     if (!event || typeof event !== 'object' || typeof event.event !== 'string') {
       result.unparsedLines += 1;
-      continue;
+      return;
     }
     result.eventCounts[event.event] = (result.eventCounts[event.event] ?? 0) + 1;
     if (typeof event.conversation_id === 'string' && event.conversation_id.trim() !== '') {
@@ -493,11 +493,20 @@ export function parseAntigravityOutput(stdoutText) {
       result.errors.push(String(message).slice(0, 2000));
     }
   }
-  if (!sawResult && result.errors.length === 0) {
-    result.errors.push('antigravity output did not include a result event');
+  function finish() {
+    if (!sawResult && result.errors.length === 0) {
+      result.errors.push('antigravity output did not include a result event');
+    }
+    result.ok = sawResult && result.errors.length === 0 && result.finalMessage !== null;
+    return result;
   }
-  result.ok = sawResult && result.errors.length === 0 && result.finalMessage !== null;
-  return result;
+  return { acceptLine, finish };
+}
+
+export function parseAntigravityOutput(stdoutText) {
+  const parser = createAntigravityOutputParser();
+  for (const line of String(stdoutText ?? '').split(/\r?\n/)) parser.acceptLine(line);
+  return parser.finish();
 }
 
 export function parsePeerOutput(target, stdoutText, lastMessageText = null) {

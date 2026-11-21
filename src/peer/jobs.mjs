@@ -20,10 +20,11 @@ import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
-import { formatAntigravityInput, parsePeerOutput } from './cli.mjs';
+import { createAntigravityOutputParser, formatAntigravityInput, parsePeerOutput } from './cli.mjs';
 import { clearActive, readProcessTable, recordActive } from './lineage.mjs';
 
 export const ACTIVE_JOB_STATES = Object.freeze(['running', 'cancelling', 'timing_out']);
@@ -250,7 +251,6 @@ export function createPeerJobs({
     entry.settled = true;
     clearTimeout(entry.timer);
     const record = entry.record;
-    const stdoutText = Buffer.concat(entry.stdoutChunks).toString('utf8');
     let lastMessage = null;
     if (record.target === 'codex') {
       try {
@@ -259,7 +259,8 @@ export function createPeerJobs({
         lastMessage = null;
       }
     }
-    const parsed = parsePeerOutput(record.target, stdoutText, lastMessage);
+    const parsed = entry.antigravityParser?.finish()
+      ?? parsePeerOutput(record.target, Buffer.concat(entry.stdoutChunks).toString('utf8'), lastMessage);
     const stderrText = Buffer.concat(entry.stderrChunks).toString('utf8');
     Object.assign(record, {
       endedAt: now(),
@@ -407,6 +408,7 @@ export function createPeerJobs({
         child: null,
         waiters: new Set(),
         stdoutChunks: [],
+        antigravityParser: plan.target === 'antigravity' ? createAntigravityOutputParser() : null,
         stderrChunks: [],
         stdoutBytes: 0,
         stderrBytes: 0,
@@ -444,10 +446,14 @@ export function createPeerJobs({
     record.pid = child.pid ?? null;
     // Every listener is attached synchronously after spawn, before any await, so an
     // early exit or error can never be emitted with nobody listening.
+    if (entry.antigravityParser && child.stdout) {
+      // The terminal result can follow many MiB of progress events.
+      createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', entry.antigravityParser.acceptLine);
+    }
     child.stdout?.on('data', (chunk) => {
       entry.stdoutBytes += chunk.length;
       if (!entry.stdoutFile.destroyed) entry.stdoutFile.write(chunk);
-      if (entry.stdoutBytes <= MAX_PARSE_BYTES) entry.stdoutChunks.push(chunk);
+      if (!entry.antigravityParser && entry.stdoutBytes <= MAX_PARSE_BYTES) entry.stdoutChunks.push(chunk);
     });
     child.stderr?.on('data', (chunk) => {
       entry.stderrBytes += chunk.length;

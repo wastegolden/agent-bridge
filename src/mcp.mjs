@@ -9,7 +9,7 @@ export { ARTIFACT_STATE_ENUM, ARTIFACT_STATE_SCHEMA, CHECKS_SCHEMA };
 
 const object = properties => ({type:'object',properties,additionalProperties:false});
 // Advertised bridge release identity matches the plugin release.
-export const BRIDGE_VERSION='2.1.0';
+export const BRIDGE_VERSION='2.1.1';
 const str={type:'string'};const num={type:'integer'};const bool={type:'boolean'};
 const taskArgs={taskId:str};
 const overrideSchema=object({reason:{type:'string',maxLength:500,pattern:'\\S'}});

@@ -74,7 +74,8 @@ async function locateClaudeSource(settings, claudeId, read) {
   const entries = Array.isArray(catalog.plugins) ? catalog.plugins.filter((entry) => entry?.name === name) : [];
   if (entries.length !== 1 || typeof entries[0].source !== 'string') fail('Claude directory marketplace entry is missing, ambiguous or unsupported.');
   const dir = path.resolve(source.path, entries[0].source);
-  if (!keyPath(dir).startsWith(`${keyPath(source.path)}/`)) fail('Claude directory marketplace entry must stay inside its marketplace.');
+  const relative = path.relative(source.path, dir);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('Claude directory marketplace entry must stay inside its marketplace.');
   return { dir, record, catalog, entry: entries[0] };
 }
 
