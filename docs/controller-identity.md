@@ -319,7 +319,7 @@ Two ASCII request headers carry submission provenance:
 
 | Header | Rule |
 |---|---|
-| `X-Agent-Bridge-Chain` | `claude-code>codex` style, **1–5** members from `claude-code`, `codex`, `dsh`, joined by `>`, at most **256** characters |
+| `X-Agent-Bridge-Chain` | `claude-code>codex` style, **1–5** members from `claude-code`, `codex`, `antigravity`, `dsh`, joined by `>`, at most **256** characters |
 | `X-Agent-Bridge-Root-Task` | Optional; requires a chain; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
 
 - A duplicated header or a non-string value is `VIA_INVALID`. Header control

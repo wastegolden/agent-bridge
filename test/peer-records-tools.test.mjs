@@ -170,6 +170,7 @@ test('peer config validates the records, bridge and codex thread keys and applie
     disputedRetainDays: 30,
     sweepIntervalMinutes: 60,
     claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'),
+    antigravityDataDir: path.join(os.homedir(), '.gemini', 'antigravity-cli'),
   });
   assert.equal(defaults.bridge, null);
 
@@ -191,6 +192,7 @@ test('peer config validates the records, bridge and codex thread keys and applie
     disputedRetainDays: 11,
     sweepIntervalMinutes: 0,
     claudeProjectsDir: path.join(ABS, 'claude'),
+    antigravityDataDir: path.join(os.homedir(), '.gemini', 'antigravity-cli'),
   });
   assert.equal(explicit.peers.codex.threadSection, null);
   assert.equal(explicit.peers.codex.threadNamePrefix, '[x]');

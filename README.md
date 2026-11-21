@@ -2,16 +2,16 @@
 
 # Agent Bridge
 
-Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 2.0.0，MIT。
+Agent Bridge 让 **Claude Code**、**Codex**、**Antigravity** 和 **DeepSeek Harness（DSH）** 互相调用。你在对话的那个 harness 是任务的**根主控**：它把有边界的实现交给 DSH 的 Flash worker，把咨询、独立审查或一个子项目交给另一个 harness。每个任务只有一个根主控，DSH worker 任务有明确的读/写根、工具白名单和预算，委派链由服务端强制执行，不会出现互相委派的环。版本 2.1.0，MIT。
 
-> 独立项目，与 DeepSeek、OpenAI、Anthropic 均无隶属或背书关系。
+> 独立项目，与 DeepSeek、OpenAI、Anthropic、Google 均无隶属或背书关系。
 
 ## 组成
 
 ```
                     你（用户）
                         │
-        根主控：Claude Code 或 Codex（每个任务恰好一个）
+   根主控：Claude Code / Codex / Antigravity（每个任务恰好一个）
                         │
          ┌──────────────┴──────────────┐
          │                             │
@@ -29,8 +29,8 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 | 部分 | 位置 | 作用 |
 |---|---|---|
 | DSH 宿主桥 | `dsh-host/index.cjs`、`src/*` | DSH 插件，在 DSH 宿主上提供 MCP 端点 `/mcp/codex-bridge-v1`（默认 `http://127.0.0.1:3080`），用 bearer 令牌鉴权 |
-| `dsh_project` | 两边的插件清单（MCP server） | 两个根都用 stdio 载体 `bin/bridge.mjs`，从各自凭据文件读取令牌，再转发到宿主 HTTP 端点 |
-| `agent_peer` | `bin/peer-mcp.mjs`、`src/peer/*` | 用无头 CLI 在 Claude Code 与 Codex 之间做咨询 / 只读审查 / 子主控委派，带作业账本、链规则与收尾记录 |
+| `dsh_project` | 各端插件清单（MCP server） | 各根主控均用 stdio 载体 `bin/bridge.mjs`，从各自凭据文件读取令牌，再转发到宿主 HTTP 端点 |
+| `agent_peer` | `bin/peer-mcp.mjs`、`src/peer/*` | 用无头 CLI 在 Claude Code、Codex 与 Antigravity 之间做咨询 / 只读审查 / 子主控委派，带作业账本、链规则与收尾记录 |
 | skills | `skills/agent-bridge-routing`、`skills/dsh-project-execution` | 路由规则与 DSH 执行规范 |
 
 ### DSH 宿主桥
@@ -42,7 +42,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 - 网络也由任务包声明，只有被授予时才可用；
 - 生命周期是 审查（review）→ 集成（integrate）→ 确认（acknowledge）→ 归档 / 清理（archive / cleanup），每一步都要求前一步的真实证据。
 
-它暴露 20 个 `bridge_*` 工具（6 读、1 提交、13 变更；宿主 `bridge_capabilities` 报告的 `version` 是 **2.0.0**，与插件版本一致）：
+它暴露 20 个 `bridge_*` 工具（6 读、1 提交、13 变更；宿主 `bridge_capabilities` 报告的 `version` 是 **2.1.0**，与插件版本一致）：
 
 - 任务：`bridge_submit`、`bridge_check`、`bridge_result`、`bridge_dossier`
 - 授权：`bridge_approve`、`bridge_clarify`
@@ -60,7 +60,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 ### agent_peer
 
-`agent_peer`（`bin/peer-mcp.mjs`）用对方 harness 的无头 CLI（`codex exec` / `claude -p`）运行另一个 harness，提供 9 个工具：
+`agent_peer`（`bin/peer-mcp.mjs`）用对方 harness 的无头 CLI（`codex exec` / `claude -p` / `agy --input-format stream-json --output-format stream-json`）运行另一个 harness，提供 9 个工具：
 
 - `peer_capabilities`：我在链上的位置、现在能调谁、哪些模式被允许，以及每个 peer 的默认模型、默认思考强度和允许的思考强度列表（`defaultModel`、`defaultReasoningEffort`、`reasoningEfforts`）
 - `peer_ask`、`peer_check`、`peer_result`、`peer_cancel`、`peer_list`：作业生命周期
@@ -95,7 +95,7 @@ Agent Bridge 让 **Claude Code**、**Codex** 和 **DeepSeek Harness（DSH）** �
 
 ### 1. DSH 宿主桥
 
-先看现状：在已连通的 Claude / Codex 里调用 `bridge_capabilities`。**只有**返回的 `controllerIdentity.enabled === true` 且 `controllerIdentity.schemaVersion === 1` 时，才说明宿主已经运行控制器身份版本，可以跳过本节；缺任一项（例如旧版没有 `controllerIdentity`，或 `schemaVersion` 不是 1）就按下面替换旧安装。不要用 `version` 字段代替这两项检查；当前宿主与插件都应报告 `2.0.0`，但版本字符串本身不是身份能力的证据。
+先看现状：在已连通的 Claude / Codex / Antigravity 里调用 `bridge_capabilities`。**只有**返回的 `controllerIdentity.enabled === true` 且 `controllerIdentity.schemaVersion === 1` 时，才说明宿主已经运行控制器身份版本，可以跳过本节；缺任一项（例如旧版没有 `controllerIdentity`，或 `schemaVersion` 不是 1）就按下面替换旧安装。不要用 `version` 字段代替这两项检查；当前宿主与插件都应报告 `2.1.0`，但版本字符串本身不是身份能力的证据。
 
 替换旧安装时：
 
@@ -216,6 +216,14 @@ node scripts/switch-controller-clients.mjs --config <你的 deploy.json> --prepa
 codex plugin add agent-bridge@personal
 ```
 
+### 4b. Antigravity 插件与无头 CLI
+
+Antigravity 既可以作为**根主控**，也可以通过无头 `agy` CLI 作为**被调用端（peer target）**：
+
+- **自动部署（按需启用）**：在 `deploy.json` 中加上 `antigravityPluginDir`（例如 `C:/Users/<you>/.gemini/config/plugins/agent-bridge`）和/或 `antigravityExecutable`（例如 `C:/Users/<you>/AppData/Local/agy/bin/agy.exe`），再运行 `node scripts/deploy-local.mjs --config <deploy.json>`。未配置这两个字段时部署产物与纯 Claude+Codex 完全一致；配置后脚本会自动生成 `antigravity.token`、`agent-peer-antigravity.json`、`launch-antigravity.mjs`、把 `antigravity` 写入宿主片段 `controllers`，并把原生插件（`plugin.json`、`mcp_config.json`、`skills/`、`agents/agent-bridge-readonly.md`、`agents/agent-bridge-readonly-web.md`）部署到 `antigravityPluginDir` 且执行 `agy plugin validate`。
+- **只读与委派边界**：`consult` / `review` 会传递 `--disable-slash-commands`、可选只读 agent（默认纯本地 `agent-bridge-readonly`，仅保留 `read_file`；主控在 `peer_ask` 显式传 `webSearch: true` 时切到 `agent-bridge-readonly-web`，增加 `search_web`）和会话级 `--settings`（`allowNonWorkspaceAccess: false` 且拒绝 `write_file(*)`、`command(*)`、`mcp(*)`、`execute_url(*)`、`download_url(*)`）。`peer_ask.webSearch` 开关同样支持 `claude-code`（控制 `WebSearch`/`WebFetch`），对 `codex` 与 `delegate` 模式明确拒绝（`PEER_ARGS_INVALID`）。`delegate` 模式与 Codex 一致：保留 Antigravity 已安装的插件/MCP 配置，通过 `delegateMode`（`accept-edits` 或 `auto`）、可选 `--sandbox`（`delegateSandbox: true`）和 `delegateAllowedPermissions`（默认放行 `mcp(agent-bridge_dsh_project/*)` 与 `mcp(agent-bridge_agent_peer/*)`）运行，并继承根控制器凭据与委派链。
+- **会话清扫**：`records.antigravityDataDir`（默认 `~/.gemini/antigravity-cli`）下的临时 CLI 会话（`conversations/<id>.db`、`brain/<id>/`、`presence/<id>.lock`）会在收尾记录到期后被清扫器自动删除。
+
 ### 5. agent-peer 配置
 
 每个根使用**自己独立的** agent-peer 配置文件：Claude 的 `peer_config` 指向 `config/agent-peer-claude-code.json`，Codex 的 `AGENT_PEER_CONFIG` 指向 `config/agent-peer-codex.json`。两份配置共用同一个 `stateDir`（因此两边看到同一个作业账本和链账本），但 `bridge.credentialFile` 分别指向该根自己的控制器令牌文件（`credentials/claude-code.token` / `credentials/codex.token`）。不要把一份带 `credentialFile` 的配置文件同时交给两个根，否则一个根会读到另一个根的凭据。下面是一份模板，把 `<root-controller-id>` 和路径换成该根自己的值；部署工具会为每个根生成一份。如果机器上已经有旧的单一 `config/agent-peer.json`，部署工具会以它为底本为每个根创建缺失的 peer 配置，并把 `bridge.credentialFile` 指向该根自己的令牌文件；已存在的 per-root 配置只校验、不改写。
@@ -240,6 +248,16 @@ codex plugin add agent-bridge@personal
         "mcp__plugin_agent-bridge_agent_peer",
         "Bash"
       ]
+    },
+    "antigravity": {
+      "executable": "C:/Users/<you>/AppData/Local/agy/bin/agy.exe",
+      "readOnlyAgent": "agent-bridge-readonly",
+      "readOnlyWebAgent": "agent-bridge-readonly-web",
+      "delegateMode": "accept-edits",
+      "delegateAllowedPermissions": [
+        "mcp(agent-bridge_dsh_project/*)",
+        "mcp(agent-bridge_agent_peer/*)"
+      ]
     }
   },
   "records": {
@@ -248,7 +266,8 @@ codex plugin add agent-bridge@personal
     "retainDays": 3,
     "disputedRetainDays": 30,
     "sweepIntervalMinutes": 60,
-    "claudeProjectsDir": "C:/Users/<you>/.claude/projects"
+    "claudeProjectsDir": "C:/Users/<you>/.claude/projects",
+    "antigravityDataDir": "C:/Users/<you>/.gemini/antigravity-cli"
   },
   "bridge": { "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1", "credentialFile": "<私有目录>/credentials/<root-controller-id>.token" },
   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3 }
@@ -260,10 +279,11 @@ codex plugin add agent-bridge@personal
 - `stateDir`：作业账本、链账本和记录索引的位置。
 - `peers.<name>.executable`：对端无头 CLI 的绝对路径，可用整段 `*` 选最新版本；必须是真实可执行文件，不能是 `.cmd` / `.bat` 包装（否则配置被拒）。
 - `peers.codex.delegateSandbox`：`delegate` 模式的 Codex 沙箱（`read-only` 或 `workspace-write`）。`readOnlyDisablePlugins` 在只读模式下禁用指定插件，防止审查者通过 MCP 工具动手。
-- `peers.codex.model` / `peers.codex.reasoningEffort`、`peers.claude-code.model` / `peers.claude-code.effort`：可选，只是**默认值**，单次 `peer_ask` 可以用同名参数覆盖；都不传时用 CLI 自身的默认。
-- `peers.<target>.efforts`：可选，替换该目标的允许思考强度列表（1 到 16 个唯一字符串，每个匹配 `^[a-z][a-z0-9_-]{0,31}$`）。不写时用内置列表：codex `minimal, low, medium, high, xhigh, max, ultra`，claude-code `low, medium, high, xhigh, max`。列表外的单次值被拒为 `PEER_ARGS_INVALID`（字段 `reasoningEffort`），列表外的配置默认值被拒为 `PEER_CONFIG_INVALID`。
+- `peers.codex.model` / `peers.codex.reasoningEffort`、`peers.claude-code.model` / `peers.claude-code.effort`、`peers.antigravity.model` / `peers.antigravity.effort`：可选，只是**默认值**，单次 `peer_ask` 可以用同名参数覆盖；都不传时用 CLI 自身的默认。
+- `peers.<target>.efforts`：可选，替换该目标的允许思考强度列表（1 到 16 个唯一字符串，每个匹配 `^[a-z][a-z0-9_-]{0,31}$`）。不写时用内置列表：codex `minimal, low, medium, high, xhigh, max, ultra`，claude-code / antigravity `low, medium, high, xhigh, max`。列表外的单次值被拒为 `PEER_ARGS_INVALID`（字段 `reasoningEffort`），列表外的配置默认值被拒为 `PEER_CONFIG_INVALID`。
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`：`delegate` 模式的权限模式与允许的工具；`review` / `consult` 走只读工具集与 `--no-session-persistence`。
-- `records`：记录目录名、接受后的保留天数、失败/争议的保留天数、清扫间隔、Claude 会话目录。
+- `peers.antigravity.readOnlyAgent` / `readOnlyWebAgent` / `delegateMode` / `delegateSandbox` / `delegateAllowedPermissions`：纯本地只读 agent、带联网搜索的只读 agent、`delegate` 执行模式（`accept-edits` / `auto`）、是否加 `--sandbox`，以及 `delegate` 放行的 Antigravity 权限规则。
+- `records`：记录目录名、接受后的保留天数、失败/争议的保留天数、清扫间隔、Claude 会话目录、Antigravity CLI 数据目录（`antigravityDataDir`）。
 - `bridge`：清扫器使用的 DSH 端点。根通过 `DSH_BRIDGE_CREDENTIAL_FILE` 或自己的 `credentialFile` 读文件；delegate 继续优先使用显式注入的 `DSH_MCP_TOKEN`。
 - `limits`：超时、并发等上限。
 
@@ -271,7 +291,7 @@ codex plugin add agent-bridge@personal
 
 ## 验证
 
-1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `2.0.0`（与插件版本一致）。`controllerIdentity.self` / `admin` 应与你使用的控制器令牌一致，`controllers` 列出已配置的 ID，`controllerIdentity.enabled` 为 `true` 且 `schemaVersion` 为 `1`。
+1. 调用 `bridge_capabilities`：宿主返回的 `version` 应是 `2.1.0`（与插件版本一致）。`controllerIdentity.self` / `admin` 应与你使用的控制器令牌一致，`controllers` 列出已配置的 ID，`controllerIdentity.enabled` 为 `true` 且 `schemaVersion` 为 `1`。
 2. 调用 `peer_capabilities`：Claude 端 `self` 应是 `claude-code`，Codex 端应是 `codex`；`chain` 显示自己在链上的位置，每个 peer 的每个模式会明确告诉你是否允许，以及不允许时的错误码。
 3. 双向各跑一个可丢弃 delegate。Claude → Codex：确认 delegate 继承的是根（Claude）的非管理员身份和 `via` 链，并能完成一个便宜的 DSH 提交；Codex 一侧保留自己的 MCP 配置，不要断言“Codex 排除了用户的其他 MCP server”。Codex → Claude：确认 Claude Code delegate 只看到插件的两个 MCP server、用户其他 MCP server 不出现（这是 1.7.0 之后的明确收窄），且它仍能完成一个便宜的 DSH 提交。
 

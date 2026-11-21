@@ -199,11 +199,11 @@ test('thrown cancellation errors audit the current error and preserve rejection 
   assert.deepEqual(f.store.events(task.id).filter(event => event.type.startsWith('task/override')), events);
 });
 
-test('bridge version 2.0.0 is advertised by capabilities and MCP initialization', async () => {
-  assert.equal(BRIDGE_VERSION, '2.0.0');
+test('bridge version 2.1.0 is advertised by capabilities and MCP initialization', async () => {
+  assert.equal(BRIDGE_VERSION, '2.1.0');
   const service = { adapter: { capabilities: async () => ({ adapterVersion: '0.6.0' }) } };
   const capabilities = await createDispatcher(service)('bridge_capabilities', {}, owner);
-  assert.equal(capabilities.version, '2.0.0');
+  assert.equal(capabilities.version, '2.1.0');
   assert.equal(capabilities.adapterVersion, '0.6.0');
   const handler = createMcpHandler(service, { registry: { ids: owner.controllerIds, authenticate: () => owner.principal } });
   const request = Readable.from([Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }))]);
@@ -213,5 +213,5 @@ test('bridge version 2.0.0 is advertised by capabilities and MCP initialization'
     writeHead(status) { assert.equal(status, 200); },
     end(body) { response = JSON.parse(body); },
   });
-  assert.equal(response.result.serverInfo.version, '2.0.0');
+  assert.equal(response.result.serverInfo.version, '2.1.0');
 });

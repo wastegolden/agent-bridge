@@ -1,17 +1,18 @@
 ---
 name: agent-bridge-routing
-description: Decide which harness does what when Claude Code, Codex and DSH (DeepSeek Harness) work on one task — one root controller, bounded DSH workers through the dsh_project bridge_* tools, the other harness through the agent_peer peer_* tools (consult, independent review, sub-controller delegation), no delegation loops, and evidence-based cross-model verification. Use when planning multi-agent or cross-model work, before calling peer_ask, or when asked to get a second opinion from another model.
+description: Decide which harness does what when Claude Code, Codex, Antigravity and DSH (DeepSeek Harness) work on one task — one root controller, bounded DSH workers through the dsh_project bridge_* tools, peer harnesses through the agent_peer peer_* tools (consult, independent review, sub-controller delegation), no delegation loops, and evidence-based cross-model verification. Use when planning multi-agent or cross-model work, before calling peer_ask, or when asked to get a second opinion from another model.
 ---
 
 # Agent bridge routing
 
-Three harnesses can work on one task: **Claude Code**, **Codex** and **DSH**
+Four harnesses can work on one task: **Claude Code**, **Codex**, **Antigravity** and **DSH**
 (DeepSeek Harness, default model DeepSeek Flash). Two tool surfaces connect them:
 
 - `dsh_project` — `bridge_*` tools: bounded DSH worker tasks, supervisor projects, isolated
   worktrees, review and integration. Details: the `dsh-project-execution` skill.
-- `agent_peer` — `peer_*` tools: run the *other* harness headlessly (`codex exec` or
-  `claude -p`) to consult, independently review, or act as a sub-controller.
+- `agent_peer` — `peer_*` tools: run another peer harness headlessly (`codex exec`,
+  `claude -p`, or `agy --input-format stream-json --output-format stream-json`) to consult,
+  independently review, or act as a sub-controller.
 
 ## One task, one root controller
 
@@ -54,7 +55,7 @@ as a result; never route around it. Call `peer_capabilities` to see your positio
 | Bounded coding, repair, investigation, mechanical edits, read-only review of a clear scope | DSH worker via `bridge_submit` (cheap, parallel, one worktree per writer) |
 | Many independent pieces or a project that must survive several rounds | DSH supervisor project (`packet.project`) |
 | Second opinion on a design, risky change or root cause | `peer_ask` mode `consult` to the other harness |
-| Cross-examination of a settled answer or an existing peer session | DSH: `bridge_followup` on the same task (`afterAttemptId` = the current `attemptId`); Codex/Claude Code: `peer_ask` with the earlier `sessionId` |
+| Cross-examination of a settled answer or an existing peer session | DSH: `bridge_followup` on the same task (`afterAttemptId` = the current `attemptId`); Codex/Claude Code/Antigravity: `peer_ask` with the earlier `sessionId` |
 | Independent review of a diff, plan or claim | `peer_ask` mode `review` (read-only) — and optionally a DSH `review` task in parallel |
 | A whole sub-project that needs its own planning and its own workers | `peer_ask` mode `delegate` (root only): the peer becomes sub-controller and may use its own subagents and DSH |
 | Tiny or tightly coupled edits | Do it yourself; delegation overhead is not free |
@@ -78,16 +79,19 @@ Each call can also set the model and reasoning effort for that one run. `model` 
 `reasoningEffort` work on a new session and on a continuation (`sessionId`), so a
 session can switch either between turns without editing the config or restarting the
 server: codex gets `-c model_reasoning_effort="<E>"` (also on `exec resume`),
-claude-code gets `--effort <E>`.
+claude-code and antigravity get `--effort <E>`.
 
 Precedence for both: the per-call argument, then the config default
 (`peers.codex.model` / `peers.codex.reasoningEffort`, `peers.claude-code.model` /
-`peers.claude-code.effort`), then the CLI's own default (nothing passed). Allowed
-efforts are `peers.<target>.efforts` when configured, otherwise codex
-`minimal, low, medium, high, xhigh, max, ultra` and claude-code
-`low, medium, high, xhigh, max`; a value matches the lowercase identifier pattern
-`^[a-z][a-z0-9_-]{0,31}$`. `peer_capabilities` reports `defaultModel`,
-`defaultReasoningEffort` and `reasoningEfforts` for each peer. A per-call value outside
+`peers.claude-code.effort`, `peers.antigravity.model` / `peers.antigravity.effort`),
+then the CLI's own default (nothing passed). Allowed efforts are `peers.<target>.efforts`
+when configured, otherwise codex `minimal, low, medium, high, xhigh, max, ultra` and
+claude-code / antigravity `low, medium, high, xhigh, max`; a value matches the lowercase
+identifier pattern `^[a-z][a-z0-9_-]{0,31}$`. (Note: for `antigravity`, passing a model
+slug that already embeds an effort suffix together with `--effort` is rejected by `agy`
+rather than silently overridden; pass the base model slug when also setting
+`reasoningEffort`.) `peer_capabilities` reports `defaultModel`, `defaultReasoningEffort`
+and `reasoningEfforts` for each peer. A per-call value outside
 the list is refused with `PEER_ARGS_INVALID` (`field: reasoningEffort`), a config
 default outside it with `PEER_CONFIG_INVALID`. Every job record (`job.json`, the
 `peer_check` / `peer_result` snapshots and `peer_list` rows) carries `model`,
@@ -127,7 +131,7 @@ anything where one model's blind spot is expensive.
 `bridge_check` and `peer_check` bounded waits are the default. For long DSH work, a root
 task may carry `rootCallback: {grantId}` (host `rootCallbackGrants` + `eventWake`):
 
-- **Claude Code controller:** run `node <plugin>/bin/wake-claude.mjs --config <json> --wait`
+- **Claude Code / Antigravity controller:** run `node <plugin>/bin/wake-claude.mjs --config <json> --wait`
   as a background command (or `--follow` as a long-lived monitor). It prints one
   `[dsh-bridge-event]` block per event; verify with `bridge_check`/`bridge_result`, then
   acknowledge with `--ack <eventId>`. Unacknowledged events stay `unknown`, never resent.
@@ -151,9 +155,10 @@ When a root task is reviewed and accepted (or definitively failed), close it out
    conclusion, and adds an entry to the external index in the peer state directory.
 4. Raw sessions are cleaned automatically by the sweeper: accepted tasks 3 days after the
    record, failed/disputed/unresolved after 30 days, never with `keep: true`. Codex peer
-   threads are deleted, Claude peer sessions are deleted, DSH sessions are archived (DSH has
-   no delete API). Only sessions listed in a record are ever touched, and only after the
-   record file exists.
+   threads are deleted, Claude peer sessions are deleted, Antigravity CLI sessions
+   (`conversations/<id>.db`, `brain/<id>/`, `presence/<id>.lock`) are deleted, and DSH
+   sessions are archived (DSH has no delete API). Only sessions listed in a record are
+   ever touched, and only after the record file exists.
 
 `record_list` shows records and their cleanup state; `cleanup_run {dryRun:true}` previews
 the next sweep. Codex peer threads are also grouped in the Codex sidebar section
@@ -180,6 +185,22 @@ session at all (`--no-session-persistence`), so they cannot be resumed.
   inherited the root identity/carrier and can submit, without claiming Codex excludes
   other MCP servers. A headless `claude -p` needs its own login (`claude` → `/login`);
   until then calls fail with "Not logged in" and are reported as failed jobs.
+- **Antigravity, consult/review:** `--disable-slash-commands`, optional `--agent`
+  (`readOnlyAgent`, default `agent-bridge-readonly`, exposing `read_file` only; or
+  `readOnlyWebAgent`, default `agent-bridge-readonly-web`, adding `search_web` when the
+  controller explicitly sets `webSearch: true`), and session-only `--settings` setting
+  `allowNonWorkspaceAccess: false` and denying `write_file(*)`, `command(*)`, `mcp(*)`,
+  `execute_url(*)` and `download_url(*)`. On `peer_ask`, the optional `webSearch` boolean
+  lets the controller choose per-task whether a read-only run (`consult`/`review`) may
+  search the web: supported on `antigravity` (switches between `readOnlyAgent` and
+  `readOnlyWebAgent`) and `claude-code` (toggles `WebSearch`/`WebFetch`); explicitly refused
+  (`PEER_ARGS_INVALID`) on `codex` and in `delegate` mode. **Antigravity, delegate:**
+  `delegateMode` (`accept-edits` or `auto`), optional `--sandbox` (`delegateSandbox: true`),
+  and `delegateAllowedPermissions` (defaulting to `mcp(agent-bridge_dsh_project/*)` and
+  `mcp(agent-bridge_agent_peer/*)`). Like Codex, an Antigravity delegate loads its installed
+  plugins/MCP configuration and inherits the root credential/chain environment (`DSH_MCP_TOKEN`,
+  `DSH_BRIDGE_DELEGATED=1`, `AGENT_BRIDGE_CHAIN`); the two-entry strict MCP exclusion is
+  Claude-only. A headless `agy` needs its own login first.
 - The chain survives a harness that filters MCP environments: the peer server records every
   child in a lineage ledger and the callee's server recovers its chain from it. This guards
   against accidental loss, not against a hostile sub-controller with shell access.

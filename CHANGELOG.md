@@ -1,3 +1,28 @@
+# 2.1.0 — bidirectional Antigravity support and read-only `webSearch` toggle (2026-11-21)
+
+## Antigravity as root controller and peer target
+
+- Added `antigravity` to `HARNESSES`, `PEER_TARGETS` (`src/peer/chain.mjs`), host `X-Agent-Bridge-Chain` validation (`src/controller-auth.mjs`), and DSH session title labeling (`src/dsh-adapter.mjs`). Three-harness chains (e.g. `claude-code>codex>antigravity` up to depth 2) and cycle/self-target refusals work across Claude Code, Codex and Antigravity.
+- Added native Antigravity plugin packaging: `.antigravity-plugin/plugin.json`, `.antigravity-mcp.json` (mounting both `dsh_project` via `bin/bridge.mjs` and `agent_peer` via `bin/peer-mcp.mjs` with `AGENT_BRIDGE_SELF=antigravity`), and two isolated read-only agent definitions under `.antigravity-plugin/agents/` (`agent-bridge-readonly.md` with `read_file` only; `agent-bridge-readonly-web.md` adding `search_web`) so Claude Code never scans them.
+- Added headless `agy` CLI peer adapter (`src/peer/cli.mjs`, `src/peer/config.mjs`, `src/peer/jobs.mjs`):
+  - Uses `--input-format stream-json --output-format stream-json --disable-slash-commands` with NDJSON user-turn framing on stdin (while keeping human-readable `prompt.txt` on disk for durable closeout records), `--conversation <id>` for session continuation, structured `--model` / `--effort` (`low|medium|high|xhigh|max` or configured `efforts`), and structured NDJSON output parsing (`parseAntigravityOutput`).
+  - Read-only runs (`consult` / `review`) enforce ephemeral `--settings` with `allowNonWorkspaceAccess: false` and `permissions.deny` blocking `write_file(*)`, `command(*)`, `mcp(*)`, `execute_url(*)` and `download_url(*)`, plus `--agent` selection (`readOnlyAgent` / `readOnlyWebAgent`).
+  - Delegate runs (`delegate`) align with Codex (keeping installed plugins/MCP config), apply `delegateMode` (`accept-edits` | `auto`), optional `--sandbox` (`delegateSandbox`), `--add-dir`, and validated `delegateAllowedPermissions` (defaulting to `mcp(agent-bridge_dsh_project/*)` and `mcp(agent-bridge_agent_peer/*)`), while inheriting verified root credentials and delegation chain/lineage.
+  - Extended `CALLER_SESSION_ENV_RE` to strip `ANTIGRAVITY_*` session/language-server/CSRF variables and `AGY_REQUIRE_AUTHENTICATED_UI_BOOTSTRAP` when spawning peer CLIs.
+- Added Antigravity CLI session cleanup in `src/peer/sweeper.mjs` and `records.antigravityDataDir` (default `~/.gemini/antigravity-cli`): deletes `brain/<id>/`, `presence/<id>.lock`, `conversations/<id>.db-wal`/`-shm`, and removes `conversations/<id>.db` last so partial `EBUSY`/`EPERM` failures remain findable and deferred.
+
+## Per-call read-only `webSearch` toggle
+
+- Added optional `webSearch` boolean to `peer_ask` and advertised `webSearchControl` per target in `peer_capabilities`:
+  - `antigravity`: defaults to `readOnlyAgent` (local-only `read_file`) when deployed; `webSearch: true` selects `readOnlyWebAgent` (`read_file` + `search_web`) while retaining all read-only deny rules; fails closed (`PEER_CONFIG_INVALID`) when the requested state cannot be enforced by the configured agents.
+  - `claude-code`: `webSearch: false` removes and disallows `WebSearch`/`WebFetch`; `webSearch: true` enables them; omitted preserves existing `readOnlyTools`.
+  - `codex` and `delegate` mode: explicitly refused with `PEER_ARGS_INVALID` (`field: webSearch`).
+
+## Opt-in deployment and tests
+
+- Extended `scripts/deploy-local.mjs` with opt-in `antigravityPluginDir`, `antigravityExecutable` and `antigravityDataDir`: existing Claude+Codex deployments remain unchanged when omitted; when configured, deployment generates `antigravity.token`, `agent-peer-antigravity.json`, `launch-antigravity.mjs`, adds `antigravity` to host identity fragments, installs the native Antigravity plugin, and validates it via `agy plugin validate`.
+- Added `test/antigravity.test.mjs`, updated `test/fixtures/fake-peer-cli.mjs`, `test/dsh-adapter.test.mjs`, `test/peer-records-tools.test.mjs`, `test/controller-audit.test.mjs`, and `test/controller-client-switch.test.mjs`. Verified against real `agy.exe` (plugin validation, read-only local/web toggle, delegate MCP lineage + `PEER_CYCLE`, and real session cleanup).
+
 # 2.0.0 — controller identity and `bridge_followup` (2026-11-04)
 
 ## Breaking changes

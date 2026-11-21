@@ -1,12 +1,12 @@
 {
   "name": "agent-bridge",
-  "version": "2.0.0",
-  "description": "Let Claude Code, Codex and DeepSeek Harness (DSH) call each other: bounded DSH worker tasks, cross-harness consult/review/delegate, one root controller per task, no delegation loops.",
+  "version": "2.1.0",
+  "description": "Let Claude Code, Codex, Antigravity and DeepSeek Harness (DSH) call each other: bounded DSH worker tasks, cross-harness consult/review/delegate, one root controller per task, no delegation loops.",
   "license": "MIT",
   "private": true,
   "type": "module",
   "main": "dsh-host/index.cjs",
-  "keywords": ["dsh", "deepseek-harness", "claude-code", "codex", "mcp", "multi-agent", "delegation", "cross-review"],
+  "keywords": ["dsh", "deepseek-harness", "claude-code", "codex", "antigravity", "mcp", "multi-agent", "delegation", "cross-review"],
   "engines": {
     "node": ">=24"
   },

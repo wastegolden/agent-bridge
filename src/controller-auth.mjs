@@ -85,8 +85,8 @@ export function parseViaHeaders(req) {
   }
   const chain = values['x-agent-bridge-chain'];
   const rootTask = values['x-agent-bridge-root-task'];
-  if (chain && (chain.length > 256 || !/^(claude-code|codex|dsh)(>(claude-code|codex|dsh)){0,4}$/.test(chain))) {
-    fail('VIA_INVALID', 'Invalid via chain', { field: 'via.chain', expected: '1 to 5 harness names (claude-code, codex, dsh), joined by >; maximum 256 bytes' });
+  if (chain && (chain.length > 256 || !/^(claude-code|codex|antigravity|dsh)(>(claude-code|codex|antigravity|dsh)){0,4}$/.test(chain))) {
+    fail('VIA_INVALID', 'Invalid via chain', { field: 'via.chain', expected: '1 to 5 harness names (claude-code, codex, antigravity, dsh), joined by >; max 256 bytes' });
   }
   if (rootTask && (!chain || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(rootTask))) {
     fail('VIA_INVALID', 'Invalid via root task', { field: 'via.rootTask', expected: 'chain required; root task matching ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' });

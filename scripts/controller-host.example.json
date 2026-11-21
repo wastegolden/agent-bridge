@@ -9,6 +9,10 @@
       "tokenFile": "F:/temp/agent-bridge-upstream/deploy-p0b/credentials/codex.token"
     },
     {
+      "id": "antigravity",
+      "tokenFile": "F:/temp/agent-bridge-upstream/deploy-p0b/credentials/antigravity.token"
+    },
+    {
       "id": "operator",
       "tokenFile": "F:/temp/agent-bridge-upstream/deploy-p0b/credentials/operator.token",
       "admin": true

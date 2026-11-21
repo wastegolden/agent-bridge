@@ -1,0 +1,9 @@
+{
+  "name": "agent-bridge",
+  "displayName": "Agent Bridge (DSH · Codex · Claude Code · Antigravity)",
+  "version": "2.1.0",
+  "description": "Controller tools for multi-harness work: delegate bounded tasks to DeepSeek Harness workers (dsh_project bridge_* tools) and consult, cross-review or appoint another harness (Codex, Claude Code or Antigravity) as sub-controller (agent_peer peer_* tools), with one root controller per task and no delegation loops.",
+  "author": {
+    "name": "agent-bridge contributors"
+  }
+}

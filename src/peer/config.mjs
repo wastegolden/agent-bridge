@@ -29,7 +29,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { isLocalBridgeUrl } from './bridge-client.mjs';
-import { CLAUDE_DELEGATE_MODES, CLAUDE_READ_ONLY_ALLOWED, CLAUDE_READ_ONLY_TOOLS, CODEX_PLUGIN_ID_RE, CODEX_SANDBOXES, EFFORT_RE, MODEL_RE, effortChoices } from './cli.mjs';
+import {
+  ANTIGRAVITY_AGENT_NAME_RE,
+  ANTIGRAVITY_DEFAULT_DELEGATE_PERMISSIONS,
+  ANTIGRAVITY_DELEGATE_MODES,
+  ANTIGRAVITY_PERMISSION_RULE_RE,
+  CLAUDE_DELEGATE_MODES,
+  CLAUDE_READ_ONLY_ALLOWED,
+  CLAUDE_READ_ONLY_TOOLS,
+  CODEX_PLUGIN_ID_RE,
+  CODEX_SANDBOXES,
+  EFFORT_RE,
+  MODEL_RE,
+  effortChoices,
+} from './cli.mjs';
 import { PEER_TARGETS, PeerPolicyError } from './chain.mjs';
 import { DEFAULT_DISPUTED_RETAIN_DAYS, DEFAULT_RECORD_DIR, DEFAULT_RETAIN_DAYS } from './records.mjs';
 
@@ -59,9 +72,10 @@ const TOP_KEYS = ['schemaVersion', 'stateDir', 'peers', 'limits', 'records', 'br
 const PEER_KEYS = {
   codex: ['executable', 'enabled', 'model', 'reasoningEffort', 'efforts', 'profile', 'delegateSandbox', 'readOnlyIgnoreUserConfig', 'readOnlyDisablePlugins', 'threadSection', 'threadNamePrefix'],
   'claude-code': ['executable', 'enabled', 'model', 'effort', 'efforts', 'fallbackModel', 'readOnlyTools', 'delegatePermissionMode', 'delegateAllowedTools'],
+  antigravity: ['executable', 'enabled', 'model', 'effort', 'efforts', 'readOnlyAgent', 'readOnlyWebAgent', 'delegateMode', 'delegateSandbox', 'delegateAllowedPermissions'],
 };
 const LIMIT_KEYS = Object.keys(DEFAULT_LIMITS);
-const RECORD_KEYS = ['enabled', 'dirName', 'retainDays', 'disputedRetainDays', 'sweepIntervalMinutes', 'claudeProjectsDir'];
+const RECORD_KEYS = ['enabled', 'dirName', 'retainDays', 'disputedRetainDays', 'sweepIntervalMinutes', 'claudeProjectsDir', 'antigravityDataDir'];
 const BRIDGE_KEYS = ['url', 'credentialFile'];
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
 
@@ -170,6 +184,7 @@ function normalizeRecordsConfig(value) {
     disputedRetainDays: DEFAULT_DISPUTED_RETAIN_DAYS,
     sweepIntervalMinutes: DEFAULT_SWEEP_INTERVAL_MINUTES,
     claudeProjectsDir: path.join(os.homedir(), '.claude', 'projects'),
+    antigravityDataDir: path.join(os.homedir(), '.gemini', 'antigravity-cli'),
   };
   if (value === undefined || value === null) return records;
   if (!isPlainObject(value)) fail('records must be an object', 'records');
@@ -180,6 +195,7 @@ function normalizeRecordsConfig(value) {
   if (value.disputedRetainDays !== undefined) records.disputedRetainDays = positiveInt(value.disputedRetainDays, 'records.disputedRetainDays');
   if (value.sweepIntervalMinutes !== undefined) records.sweepIntervalMinutes = nonNegativeInt(value.sweepIntervalMinutes, 'records.sweepIntervalMinutes');
   if (value.claudeProjectsDir !== undefined) records.claudeProjectsDir = absolute(value.claudeProjectsDir, 'records.claudeProjectsDir');
+  if (value.antigravityDataDir !== undefined) records.antigravityDataDir = absolute(value.antigravityDataDir, 'records.antigravityDataDir');
   return records;
 }
 
@@ -240,7 +256,7 @@ export function normalizePeerConfig(raw) {
       peer.threadNamePrefix = value.threadNamePrefix === undefined
         ? DEFAULT_THREAD_NAME_PREFIX
         : boundedName(value.threadNamePrefix, MAX_THREAD_NAME_PREFIX_CHARS, 'peers.codex.threadNamePrefix');
-    } else {
+    } else if (name === 'claude-code') {
       peer.effort = optionalEnum(value.effort, effortChoices(name, peer), 'peers.claude-code.effort');
       peer.fallbackModel = optionalModel(value.fallbackModel, 'peers.claude-code.fallbackModel');
       peer.readOnlyTools = stringList(value.readOnlyTools, 'peers.claude-code.readOnlyTools') ?? [...CLAUDE_READ_ONLY_TOOLS];
@@ -252,6 +268,31 @@ export function normalizePeerConfig(raw) {
         fail(`peers.claude-code.delegatePermissionMode must be one of ${CLAUDE_DELEGATE_MODES.join(', ')}`, 'peers.claude-code.delegatePermissionMode');
       }
       peer.delegateAllowedTools = stringList(value.delegateAllowedTools, 'peers.claude-code.delegateAllowedTools') ?? [];
+    } else if (name === 'antigravity') {
+      peer.effort = optionalEnum(value.effort, effortChoices(name, peer), 'peers.antigravity.effort');
+      if (value.readOnlyAgent === undefined || value.readOnlyAgent === null) {
+        peer.readOnlyAgent = null;
+      } else if (typeof value.readOnlyAgent !== 'string' || !ANTIGRAVITY_AGENT_NAME_RE.test(value.readOnlyAgent)) {
+        fail('peers.antigravity.readOnlyAgent is not a valid agent name', 'peers.antigravity.readOnlyAgent');
+      } else {
+        peer.readOnlyAgent = value.readOnlyAgent;
+      }
+      if (value.readOnlyWebAgent === undefined || value.readOnlyWebAgent === null) {
+        peer.readOnlyWebAgent = null;
+      } else if (typeof value.readOnlyWebAgent !== 'string' || !ANTIGRAVITY_AGENT_NAME_RE.test(value.readOnlyWebAgent)) {
+        fail('peers.antigravity.readOnlyWebAgent is not a valid agent name', 'peers.antigravity.readOnlyWebAgent');
+      } else {
+        peer.readOnlyWebAgent = value.readOnlyWebAgent;
+      }
+      peer.delegateMode = value.delegateMode ?? 'accept-edits';
+      if (!ANTIGRAVITY_DELEGATE_MODES.includes(peer.delegateMode)) {
+        fail(`peers.antigravity.delegateMode must be one of ${ANTIGRAVITY_DELEGATE_MODES.join(', ')}`, 'peers.antigravity.delegateMode');
+      }
+      peer.delegateSandbox = booleanValue(value.delegateSandbox, false, 'peers.antigravity.delegateSandbox');
+      peer.delegateAllowedPermissions = stringList(value.delegateAllowedPermissions, 'peers.antigravity.delegateAllowedPermissions') ?? [...ANTIGRAVITY_DEFAULT_DELEGATE_PERMISSIONS];
+      if (peer.delegateAllowedPermissions.some((rule) => !ANTIGRAVITY_PERMISSION_RULE_RE.test(rule))) {
+        fail('peers.antigravity.delegateAllowedPermissions must hold permission rules like mcp(server/*)', 'peers.antigravity.delegateAllowedPermissions');
+      }
     }
     peers[name] = Object.freeze(peer);
   }

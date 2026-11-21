@@ -10,5 +10,7 @@
   "codexExecutable": "C:/Users/YOU/AppData/Local/OpenAI/Codex/bin/*/codex.exe",
   "codexPluginId": "agent-bridge@personal",
   "claudeExecutable": "C:/Users/YOU/AppData/Roaming/Claude/claude-code/*/*/claude.exe",
-  "claudePluginId": "agent-bridge@agent-bridge-local"
+  "claudePluginId": "agent-bridge@agent-bridge-local",
+  "antigravityPluginDir": "C:/Users/YOU/.gemini/config/plugins/agent-bridge",
+  "antigravityExecutable": "C:/Users/YOU/AppData/Local/agy/bin/agy.exe"
 }

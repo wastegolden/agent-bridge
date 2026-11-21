@@ -2,7 +2,7 @@
 // agent-peer MCP stdio server (contract agent-peer-v1).
 //
 // Required environment (set in the harness's MCP server config, never by a model):
-//   AGENT_BRIDGE_SELF   which harness this server runs inside: claude-code | codex
+//   AGENT_BRIDGE_SELF   which harness this server runs inside: claude-code | codex | antigravity
 //   AGENT_PEER_CONFIG   absolute path of the operator peer config JSON
 // Inherited from a calling harness when this harness was itself started as a peer:
 //   AGENT_BRIDGE_CHAIN, AGENT_BRIDGE_MAX_DEPTH, AGENT_BRIDGE_MAX_DELEGATE_DEPTH, AGENT_BRIDGE_ROOT_TASK

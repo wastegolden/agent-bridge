@@ -4919,9 +4919,13 @@ export class DshAdapter {
     }
     record.sessionId = sessionId
     // The title names the harness that actually submitted this task: the persisted
-    // controller hint is used only when it is exactly one of the two known harnesses,
+    // controller hint is used only when it is one of the known controller harnesses,
     // otherwise the neutral `controller` label keeps the title honest.
-    const controllerLabel = packet.metadata?.controller === 'codex' || packet.metadata?.controller === 'claude-code' ? packet.metadata.controller : 'controller'
+    const controllerLabel = packet.metadata?.controller === 'codex'
+      || packet.metadata?.controller === 'claude-code'
+      || packet.metadata?.controller === 'antigravity'
+      ? packet.metadata.controller
+      : 'controller'
     if(typeof controller.rename==='function')await controller.rename({sessionId,title:`[agent-bridge·${controllerLabel}] ${packet.title}`})
     record.agentPreset = created.agentPreset ?? null
     record.agentPresetMatched = this.#options.agentPreset === undefined ? null : created.agentPreset === this.#options.agentPreset

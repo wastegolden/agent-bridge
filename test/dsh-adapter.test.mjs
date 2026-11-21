@@ -902,7 +902,10 @@ test('DSH session titles label the submitting controller', async () => {
   assert.deepEqual(await titled({ controller: 'claude-code' }), [
     { sessionId: 'session-1', title: '[agent-bridge·claude-code] label case' }
   ])
-  // Any other hint is not one of the two known harnesses: the neutral label is used.
+  assert.deepEqual(await titled({ controller: 'antigravity' }), [
+    { sessionId: 'session-1', title: '[agent-bridge·antigravity] label case' }
+  ])
+  // Any other hint is not one of the known controller harnesses: the neutral label is used.
   assert.deepEqual(await titled({ controller: 'human' }), [
     { sessionId: 'session-1', title: '[agent-bridge·controller] label case' }
   ])

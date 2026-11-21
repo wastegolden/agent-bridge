@@ -15,6 +15,9 @@
 //               codex exec resume ... -o <file> -c sandbox_mode="<s>" <id> -
 //   claude-code claude -p --output-format json [--no-session-persistence] [--resume ID]
 //                 [--model M] [--effort E] [--fallback-model F] [--add-dir D]... <permission flags>
+//   antigravity agy --input-format stream-json --output-format stream-json --disable-slash-commands
+//                 [--conversation ID] [--model M] [--effort E] [--add-dir D]...
+//                 [--agent A] [--sandbox] --settings <json>
 //
 // Read-only (consult/review):
 //   codex   -s read-only (shell sandbox). MCP servers configured in the user's Codex
@@ -25,6 +28,10 @@
 //           --disallowedTools <write tools>, --strict-mcp-config (no MCP servers),
 //           --permission-mode dontAsk, --no-session-persistence (a read-only peer leaves
 //           no resumable session behind).
+//   antigravity --disable-slash-commands, optional --agent <readOnlyAgent> (strips
+//           write/shell/MCP tool declarations when deployed), and ephemeral --settings
+//           with `allowNonWorkspaceAccess: false` plus `permissions.deny` blocking
+//           write_file(*), command(*), mcp(*), execute_url(*) and download_url(*).
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,12 +45,32 @@ export const CLAUDE_READ_ONLY_TOOLS = Object.freeze(['Read', 'Grep', 'Glob', 'We
 export const CLAUDE_READ_ONLY_ALLOWED = Object.freeze(['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'LS', 'NotebookRead', 'TodoWrite']);
 /** Built-ins that can change files, run commands or spawn agents: always denied when read-only. */
 export const CLAUDE_WRITE_TOOLS = Object.freeze(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Task', 'Agent']);
+/** Read-only web built-ins toggled by `webSearch` for Claude Code. */
+export const CLAUDE_WEB_TOOLS = Object.freeze(['WebSearch', 'WebFetch']);
 export const CODEX_SANDBOXES = Object.freeze(['read-only', 'workspace-write']);
 export const CODEX_EFFORTS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 /** Codex plugin selector `name@marketplace`, used to disable plugins for read-only runs. */
 export const CODEX_PLUGIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const CLAUDE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 export const CLAUDE_DELEGATE_MODES = Object.freeze(['acceptEdits', 'auto', 'dontAsk']);
+export const ANTIGRAVITY_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
+export const ANTIGRAVITY_DELEGATE_MODES = Object.freeze(['accept-edits', 'auto']);
+/** Permission rules always denied on a read-only Antigravity run (consult/review). */
+export const ANTIGRAVITY_READ_ONLY_DENY = Object.freeze([
+  'write_file(*)',
+  'command(*)',
+  'mcp(*)',
+  'execute_url(*)',
+  'download_url(*)',
+]);
+/** Default MCP permission rules granted to an Antigravity sub-controller (delegate). */
+export const ANTIGRAVITY_DEFAULT_DELEGATE_PERMISSIONS = Object.freeze([
+  'mcp(agent-bridge_dsh_project/*)',
+  'mcp(agent-bridge_agent_peer/*)',
+]);
+export const ANTIGRAVITY_AGENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Structured Antigravity permission rule `<action>(<target>)`, without control chars or nested parens. */
+export const ANTIGRAVITY_PERMISSION_RULE_RE = /^[a-z][a-z0-9_-]{0,63}\([^\u0000-\u001f\u007f()]{1,256}\)$/;
 /**
  * One reasoning-effort value. Deliberately narrow: the codex value is interpolated
  * into `-c model_reasoning_effort="<E>"`, so no quote, space or shell metacharacter
@@ -64,7 +91,7 @@ const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
  * after the server verifies the effective delegate credential.
  * Case-insensitive: Windows environment names are case-insensitive.
  */
-const CALLER_SESSION_ENV_RE = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|HOST_SESSION_ID|ENTRYPOINT|CHILD_SESSION|SESSION_ATTENDED|MESSAGING_[A-Z_]+)|CODEX_(THREAD_ID|TURN_ID|CALL_ID|APP_TOOLS_[A-Z_]+))$/i;
+const CALLER_SESSION_ENV_RE = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_(SESSION_ID|HOST_SESSION_ID|ENTRYPOINT|CHILD_SESSION|SESSION_ATTENDED|MESSAGING_[A-Z_]+)|CODEX_(THREAD_ID|TURN_ID|CALL_ID|APP_TOOLS_[A-Z_]+)|ANTIGRAVITY_(AGENT|AGENTAPI_EXE|APP_DATA_DIR|CONVERSATION_ID|CSRF_TOKEN|LS_ADDRESS|LS_VERSION|PROJECT_ID|SOURCE_METADATA|TRAJECTORY_ID)|AGY_REQUIRE_AUTHENTICATED_UI_BOOTSTRAP)$/i;
 
 export function childEnvironment(baseEnv, chainEnv, { mode, bridgeCredential = null } = {}) {
   const env = {};
@@ -98,12 +125,26 @@ function checkToolNames(list, field) {
   return list;
 }
 
+function checkAntigravityPermissions(list, field) {
+  for (const rule of list) {
+    if (typeof rule !== 'string' || !ANTIGRAVITY_PERMISSION_RULE_RE.test(rule)) {
+      throw new PeerPolicyError('PEER_CONFIG_INVALID', `${field} contains an invalid Antigravity permission rule`, { field });
+    }
+  }
+  return list;
+}
+
+/** Frame a prompt as one NDJSON user turn for `agy --input-format stream-json`. */
+export function formatAntigravityInput(prompt) {
+  return `${JSON.stringify({ event: 'user', message: { content: String(prompt ?? '') } })}\n`;
+}
+
 /**
  * The reasoning-effort values a target accepts: the configured
  * `peers.<target>.efforts` list when it is set, otherwise the built-in list.
  * Unknown targets have no list.
  *
- * @param {string} target 'codex' | 'claude-code'
+ * @param {string} target 'codex' | 'claude-code' | 'antigravity'
  * @param {object|null} peer normalized peer config (may be a partial `{ efforts }`)
  * @returns {string[]}
  */
@@ -112,6 +153,7 @@ export function effortChoices(target, peer) {
   if (Array.isArray(configured) && configured.length > 0) return [...configured];
   if (target === 'codex') return [...CODEX_EFFORTS];
   if (target === 'claude-code') return [...CLAUDE_EFFORTS];
+  if (target === 'antigravity') return [...ANTIGRAVITY_EFFORTS];
   return [];
 }
 
@@ -166,8 +208,18 @@ export function buildInvocation(request, peer) {
   if (readOnly && addDirs.length > 0) {
     throw new PeerPolicyError('PEER_ARGS_INVALID', 'addDirs grants extra writable roots and is only accepted for mode "delegate"', { field: 'addDirs' });
   }
+  const webSearch = request.webSearch ?? null;
+  if (webSearch !== null && typeof webSearch !== 'boolean') {
+    throw new PeerPolicyError('PEER_ARGS_INVALID', 'webSearch must be a boolean', { field: 'webSearch' });
+  }
+  if (!readOnly && webSearch !== null) {
+    throw new PeerPolicyError('PEER_ARGS_INVALID', 'webSearch only controls read-only modes ("consult" or "review")', { field: 'webSearch' });
+  }
 
   if (target === 'codex') {
+    if (webSearch !== null) {
+      throw new PeerPolicyError('PEER_ARGS_INVALID', 'codex does not support per-call webSearch control', { field: 'webSearch' });
+    }
     if (sessionId !== null && addDirs.length > 0) {
       throw new PeerPolicyError('PEER_ARGS_INVALID', 'codex exec resume cannot add writable roots; start a new delegate session instead', { field: 'addDirs' });
     }
@@ -200,22 +252,37 @@ export function buildInvocation(request, peer) {
       // `exec resume` has no -s/-C: the sandbox is pinned by the LAST config override and
       // the working directory is the session's own (the server requires the same cwd).
       : ['exec', 'resume', ...options, '-c', `sandbox_mode="${sandbox}"`, sessionId, '-'];
-    return { command: peer.executable, args, cwd, readOnly, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
+    return { command: peer.executable, args, cwd, readOnly, webSearch: null, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
   }
 
   if (target === 'claude-code') {
     effort = resolveEffort(target, request, peer);
     if (peer.fallbackModel != null && !MODEL_RE.test(peer.fallbackModel)) throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid claude fallbackModel', { field: 'fallbackModel' });
     let permission;
+    let resolvedWebSearch = null;
     if (readOnly) {
-      const tools = checkToolNames(peer.readOnlyTools ?? [...CLAUDE_READ_ONLY_TOOLS], 'readOnlyTools');
-      if (tools.some((name) => !CLAUDE_READ_ONLY_ALLOWED.includes(name))) {
+      const configuredTools = checkToolNames(peer.readOnlyTools ?? [...CLAUDE_READ_ONLY_TOOLS], 'readOnlyTools');
+      if (configuredTools.some((name) => !CLAUDE_READ_ONLY_ALLOWED.includes(name))) {
         throw new PeerPolicyError('PEER_CONFIG_INVALID', `readOnlyTools may only name ${CLAUDE_READ_ONLY_ALLOWED.join(', ')}`, { field: 'readOnlyTools' });
+      }
+      let tools = configuredTools;
+      let disallowed = [...CLAUDE_WRITE_TOOLS];
+      if (webSearch === false) {
+        tools = configuredTools.filter((name) => !CLAUDE_WEB_TOOLS.includes(name));
+        if (tools.length === 0) {
+          throw new PeerPolicyError('PEER_CONFIG_INVALID', 'readOnlyTools leaves no non-web tools when webSearch is false', { field: 'readOnlyTools' });
+        }
+        disallowed = [...CLAUDE_WRITE_TOOLS, ...CLAUDE_WEB_TOOLS];
+        resolvedWebSearch = false;
+      } else if (webSearch === true) {
+        tools = [...configuredTools];
+        for (const name of CLAUDE_WEB_TOOLS) if (!tools.includes(name)) tools.push(name);
+        resolvedWebSearch = true;
       }
       permission = [
         '--strict-mcp-config',
         '--permission-mode', 'dontAsk',
-        '--disallowedTools', ...CLAUDE_WRITE_TOOLS,
+        '--disallowedTools', ...disallowed,
         '--allowedTools', ...tools,
         '--tools', ...tools,
       ];
@@ -255,7 +322,82 @@ export function buildInvocation(request, peer) {
       // Permission flags last; the variadic tool lists end the argv (the prompt is stdin).
       ...permission,
     ];
-    return { command: peer.executable, args, cwd, readOnly, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
+    return { command: peer.executable, args, cwd, readOnly, webSearch: resolvedWebSearch, model, modelSource, reasoningEffort: effort.reasoningEffort, effortSource: effort.effortSource };
+  }
+
+  if (target === 'antigravity') {
+    effort = resolveEffort(target, request, peer);
+    const readOnlyAgent = peer.readOnlyAgent ?? null;
+    if (readOnlyAgent !== null && (typeof readOnlyAgent !== 'string' || !ANTIGRAVITY_AGENT_NAME_RE.test(readOnlyAgent))) {
+      throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid antigravity readOnlyAgent', { field: 'readOnlyAgent' });
+    }
+    const readOnlyWebAgent = peer.readOnlyWebAgent ?? null;
+    if (readOnlyWebAgent !== null && (typeof readOnlyWebAgent !== 'string' || !ANTIGRAVITY_AGENT_NAME_RE.test(readOnlyWebAgent))) {
+      throw new PeerPolicyError('PEER_CONFIG_INVALID', 'invalid antigravity readOnlyWebAgent', { field: 'readOnlyWebAgent' });
+    }
+    let settings;
+    let selectedAgent = null;
+    let resolvedWebSearch = null;
+    if (readOnly) {
+      if (webSearch === true) {
+        if (readOnlyWebAgent !== null) {
+          selectedAgent = readOnlyWebAgent;
+        } else if (readOnlyAgent !== null) {
+          throw new PeerPolicyError('PEER_CONFIG_INVALID', 'antigravity webSearch=true requires peers.antigravity.readOnlyWebAgent when readOnlyAgent is set', { field: 'readOnlyWebAgent' });
+        }
+        resolvedWebSearch = true;
+      } else if (webSearch === false) {
+        if (readOnlyAgent === null) {
+          throw new PeerPolicyError('PEER_CONFIG_INVALID', 'antigravity webSearch=false requires peers.antigravity.readOnlyAgent to disable search_web', { field: 'readOnlyAgent' });
+        }
+        selectedAgent = readOnlyAgent;
+        resolvedWebSearch = false;
+      } else {
+        selectedAgent = readOnlyAgent;
+        resolvedWebSearch = readOnlyAgent !== null ? false : null;
+      }
+      settings = {
+        agentMode: '',
+        toolPermission: 'request-review',
+        allowNonWorkspaceAccess: false,
+        permissions: { deny: [...ANTIGRAVITY_READ_ONLY_DENY] },
+      };
+    } else {
+      const delegateMode = peer.delegateMode ?? 'accept-edits';
+      if (!ANTIGRAVITY_DELEGATE_MODES.includes(delegateMode)) {
+        throw new PeerPolicyError('PEER_CONFIG_INVALID', `antigravity delegateMode must be one of ${ANTIGRAVITY_DELEGATE_MODES.join(', ')}`, { field: 'delegateMode' });
+      }
+      const allowedPermissions = checkAntigravityPermissions(peer.delegateAllowedPermissions ?? [...ANTIGRAVITY_DEFAULT_DELEGATE_PERMISSIONS], 'delegateAllowedPermissions');
+      settings = {
+        agentMode: delegateMode,
+        ...(allowedPermissions.length > 0 ? { permissions: { allow: allowedPermissions } } : {}),
+      };
+    }
+    const args = [
+      '--input-format', 'stream-json',
+      '--output-format', 'stream-json',
+      '--disable-slash-commands',
+      ...(sessionId !== null ? ['--conversation', sessionId] : []),
+      ...(model ? ['--model', model] : []),
+      ...(effort.reasoningEffort ? ['--effort', effort.reasoningEffort] : []),
+      ...addDirs.flatMap((dir) => ['--add-dir', dir]),
+      ...(readOnly && selectedAgent !== null ? ['--agent', selectedAgent] : []),
+      ...(!readOnly && peer.delegateSandbox === true ? ['--sandbox'] : []),
+      // Session-only settings sit last so nothing configured can weaken the read-only deny rules.
+      '--settings', JSON.stringify(settings),
+    ];
+    return {
+      command: peer.executable,
+      args,
+      cwd,
+      readOnly,
+      webSearch: resolvedWebSearch,
+      inputFormat: 'stream-json',
+      model,
+      modelSource,
+      reasoningEffort: effort.reasoningEffort,
+      effortSource: effort.effortSource,
+    };
   }
 
   throw new PeerPolicyError('PEER_UNKNOWN_TARGET', `no CLI adapter for "${target}"`, { field: 'target' });
@@ -315,6 +457,51 @@ export function parseClaudeOutput(stdoutText) {
   return result;
 }
 
+/** Parse `agy --output-format stream-json` NDJSON. Unknown event types are counted, never guessed. */
+export function parseAntigravityOutput(stdoutText) {
+  const result = { sessionId: null, finalMessage: null, usage: null, errors: [], eventCounts: {}, unparsedLines: 0, numTurns: null };
+  let sawResult = false;
+  for (const raw of String(stdoutText ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const event = safeJson(line);
+    if (!event || typeof event !== 'object' || typeof event.event !== 'string') {
+      result.unparsedLines += 1;
+      continue;
+    }
+    result.eventCounts[event.event] = (result.eventCounts[event.event] ?? 0) + 1;
+    if (typeof event.conversation_id === 'string' && event.conversation_id.trim() !== '') {
+      result.sessionId = event.conversation_id.trim();
+    }
+    if (event.event === 'result' && event.result && typeof event.result === 'object') {
+      sawResult = true;
+      const body = event.result;
+      if (typeof body.conversation_id === 'string' && body.conversation_id.trim() !== '') {
+        result.sessionId = body.conversation_id.trim();
+      }
+      if (typeof body.response === 'string') result.finalMessage = body.response;
+      if (body.usage && typeof body.usage === 'object') result.usage = body.usage;
+      if (Number.isInteger(body.num_turns)) result.numTurns = body.num_turns;
+      const status = typeof body.status === 'string' ? body.status.toUpperCase() : '';
+      if (typeof body.error === 'string' && body.error.trim() !== '') {
+        result.errors.push(body.error.trim().slice(0, 2000));
+      } else if (status !== '' && status !== 'SUCCESS') {
+        result.errors.push(`antigravity ended with status ${status}`.slice(0, 2000));
+      }
+    } else if (event.event === 'error') {
+      const message = event.error?.message ?? event.error ?? event.message ?? JSON.stringify(event).slice(0, 500);
+      result.errors.push(String(message).slice(0, 2000));
+    }
+  }
+  if (!sawResult && result.errors.length === 0) {
+    result.errors.push('antigravity output did not include a result event');
+  }
+  result.ok = sawResult && result.errors.length === 0 && result.finalMessage !== null;
+  return result;
+}
+
 export function parsePeerOutput(target, stdoutText, lastMessageText = null) {
-  return target === 'codex' ? parseCodexOutput(stdoutText, lastMessageText) : parseClaudeOutput(stdoutText);
+  if (target === 'codex') return parseCodexOutput(stdoutText, lastMessageText);
+  if (target === 'antigravity') return parseAntigravityOutput(stdoutText);
+  return parseClaudeOutput(stdoutText);
 }

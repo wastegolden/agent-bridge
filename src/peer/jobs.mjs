@@ -23,7 +23,7 @@ import path from 'node:path';
 
 import { stripBridgeCredentials } from '../bridge-credentials.mjs';
 import { PeerPolicyError } from './chain.mjs';
-import { parsePeerOutput } from './cli.mjs';
+import { formatAntigravityInput, parsePeerOutput } from './cli.mjs';
 import { clearActive, readProcessTable, recordActive } from './lineage.mjs';
 
 export const ACTIVE_JOB_STATES = Object.freeze(['running', 'cancelling', 'timing_out']);
@@ -352,6 +352,7 @@ export function createPeerJobs({
     modelSource = invocation?.modelSource ?? 'cli-default',
     reasoningEffort = invocation?.reasoningEffort ?? null,
     effortSource = invocation?.effortSource ?? 'cli-default',
+    webSearch = invocation?.webSearch ?? null,
   }) {
     assertJobId(jobId);
     // Reserve synchronously: no await may run between the capacity check and the reservation.
@@ -377,6 +378,7 @@ export function createPeerJobs({
         rootTask: plan.rootTask,
         cwd,
         readOnly: invocation.readOnly,
+        ...(typeof webSearch === 'boolean' ? { webSearch } : {}),
         // Public bridge status only; the credential stays exclusively in child env.
         ...(bridge === null ? {} : { bridge: { state: bridge.state, ...(bridge.reason ? { reason: bridge.reason } : {}) } }),
         // What was PASSED to the CLI. null + 'cli-default' means nothing was passed.
@@ -463,7 +465,8 @@ export function createPeerJobs({
       void settle(entry, { exitCode: code, signal: signal ?? null });
     });
     child.stdin?.on('error', () => undefined);
-    child.stdin?.end(prompt, 'utf8');
+    const stdinPayload = invocation.inputFormat === 'stream-json' ? formatAntigravityInput(prompt) : prompt;
+    child.stdin?.end(stdinPayload, 'utf8');
     if (lineage && record.pid) {
       // settle() waits for this write before clearing the entry, so a fast exit can
       // never leave a stale ledger entry behind.

@@ -1,8 +1,8 @@
 // src/peer/server.mjs
 //
-// The agent-peer MCP server (contract agent-peer-v1): lets one harness (Claude Code
-// or Codex) consult, request an independent review from, or appoint as a
-// sub-controller the OTHER harness, through that harness's own headless CLI.
+// The agent-peer MCP server (contract agent-peer-v1): lets one harness (Claude Code,
+// Codex or Antigravity) consult, request an independent review from, or appoint as a
+// sub-controller another harness, through that harness's own headless CLI.
 //
 // Transport: newline-delimited JSON-RPC 2.0 over stdio (MCP stdio). Tools:
 //   peer_capabilities  where this harness sits on the chain and what it may call
@@ -87,7 +87,7 @@ export function peerTools(limits) {
     tool('peer_capabilities', 'Report this harness, its delegation chain, which peers it may call in which modes right now, and the configured limits. Call before planning cross-harness work.', {}),
     tool(
       'peer_ask',
-      'Start one headless run of ANOTHER harness (codex or claude-code). mode "consult" answers a question, "review" is an independent read-only review, "delegate" appoints the peer as sub-controller for a bounded objective (it may run its own subagents or DSH bridge tasks). The call is refused when the target is this harness, is already on the chain (no work flows back toward the root controller), or the hop/delegate limits are exceeded. Returns the job; waits up to waitMs for completion.',
+      'Start one headless run of ANOTHER harness (codex, claude-code or antigravity). mode "consult" answers a question, "review" is an independent read-only review, "delegate" appoints the peer as sub-controller for a bounded objective (it may run its own subagents or DSH bridge tasks). The call is refused when the target is this harness, is already on the chain (no work flows back toward the root controller), or the hop/delegate limits are exceeded. Returns the job; waits up to waitMs for completion.',
       {
         target: { type: 'string', enum: [...PEER_TARGETS], description: 'Harness to run.' },
         mode: { type: 'string', enum: [...PEER_MODES], description: 'consult | review (both read-only) | delegate (may write inside cwd/addDirs).' },
@@ -96,6 +96,7 @@ export function peerTools(limits) {
         sessionId: str('Continue a session that an earlier peer job of the SAME target and the SAME root task created (from that job\'s sessionId). Other sessions are refused.', { pattern: SESSION_ID_RE.source }),
         model: str('Optional explicit model for the peer CLI. Omitted uses the configured default; with neither, nothing is passed and the CLI decides.', { pattern: MODEL_RE.source }),
         reasoningEffort: str('Optional reasoning effort for THIS run (new or continued session). Overrides peers.<target>.reasoningEffort / peers.<target>.effort; omitted uses the configured default, and with neither nothing is passed. Allowed values are peers.<target>.reasoningEfforts in peer_capabilities (call it before choosing).', { pattern: EFFORT_RE.source }),
+        webSearch: { type: 'boolean', description: 'Optional read-only (consult/review) toggle controlling whether the peer may search the web. Supported for antigravity (switches readOnlyAgent vs readOnlyWebAgent) and claude-code (toggles WebSearch/WebFetch). Explicitly refused for codex and for delegate mode.' },
         addDirs: { type: 'array', items: { type: 'string', pattern: ABSOLUTE_PATH_PATTERN }, description: 'delegate only, new sessions only: extra absolute writable directories.' },
         title: str('Short label for job listings.', { maxLength: 200 }),
         timeoutMs: int('Wall-clock limit for the peer process.', { minimum: 10_000, maximum: limits.maxTimeoutMs }),
@@ -140,7 +141,7 @@ export function peerTools(limits) {
 }
 
 const INSTRUCTIONS = [
-  'agent-peer: cross-harness consult / review / delegate between Claude Code and Codex.',
+  'agent-peer: cross-harness consult / review / delegate between Claude Code, Codex and Antigravity.',
   'Each task has exactly one root controller. Work flows down the chain; results flow back as answers. A peer can never be asked to call a harness already on its chain.',
   'Peer answers are claims from another model: verify them against files, commands and tests before acting. For cross-verification, ask independently first, then cross-examine disagreements, and decide on evidence.',
   'DSH (DeepSeek) work goes through the dsh_project bridge_* tools, not through this server.',
@@ -345,6 +346,8 @@ export function createPeerServer({
         defaultReasoningEffort: peer ? (target === 'codex' ? (peer.reasoningEffort ?? null) : (peer.effort ?? null)) : null,
         // The per-call values a reasoningEffort argument may name right now.
         reasoningEfforts: peer ? effortChoices(target, peer) : [],
+        // Whether per-call read-only `webSearch` toggling is supported on this target.
+        webSearchControl: !peer ? false : target === 'claude-code' ? true : target === 'antigravity' ? Boolean(peer.readOnlyAgent && peer.readOnlyWebAgent) : false,
         modes: {},
       };
       for (const mode of PEER_MODES) {
@@ -425,7 +428,7 @@ export function createPeerServer({
     if (!info?.isDirectory?.()) throw new PeerPolicyError('PEER_ARGS_INVALID', 'cwd must be an existing directory', { field: 'cwd' });
     const allocation = jobManager.allocate();
     const invocation = buildInvocation(
-      { target: args.target, mode: args.mode, cwd: args.cwd, sessionId: args.sessionId ?? null, model: args.model ?? null, reasoningEffort: args.reasoningEffort ?? null, addDirs: args.addDirs ?? [], lastMessageFile: allocation.lastMessageFile },
+      { target: args.target, mode: args.mode, cwd: args.cwd, sessionId: args.sessionId ?? null, model: args.model ?? null, reasoningEffort: args.reasoningEffort ?? null, webSearch: args.webSearch ?? null, addDirs: args.addDirs ?? [], lastMessageFile: allocation.lastMessageFile },
       peer,
     );
     let bridgeCredential = null;
@@ -461,6 +464,7 @@ export function createPeerServer({
       modelSource: invocation.modelSource,
       reasoningEffort: invocation.reasoningEffort,
       effortSource: invocation.effortSource,
+      webSearch: invocation.webSearch ?? null,
     });
     const waitMs = args.waitMs ?? Math.min(limits.maxWaitMs, 55_000);
     return waitMs > 0 ? jobManager.wait(job.jobId, waitMs) : job;
@@ -544,6 +548,7 @@ export function createPeerServer({
         codexThreads,
         bridge: resolvedBridgeClient ?? null,
         claudeProjectsDir: config.records?.claudeProjectsDir ?? null,
+        antigravityDataDir: config.records?.antigravityDataDir ?? null,
       });
     } finally {
       try {

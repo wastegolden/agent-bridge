@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deploy this plugin to a local machine (Claude Code + Codex): first install or update.
+// Deploy this plugin to a local machine (Claude Code + Codex + optional Antigravity): first install or update.
 //
 //   node scripts/deploy-local.mjs --config <deploy.json> [--dry-run] [--prepare-only]
 //
@@ -29,15 +29,18 @@
 //   "codexPluginId": "agent-bridge@personal",                                    optional
 //   "codexMarketplace": "C:/Users/<you>/.agents/plugins/marketplace.json",      optional
 //   "claudeExecutable": "C:/.../claude-code/*/*/claude.exe",                     optional
-//   "claudePluginId": "agent-bridge@agent-bridge-local"                          optional
+//   "claudePluginId": "agent-bridge@agent-bridge-local",                         optional
+//   "antigravityPluginDir": "C:/Users/<you>/.gemini/config/plugins/agent-bridge", optional
+//   "antigravityExecutable": "C:/Users/<you>/AppData/Local/agy/bin/agy.exe",      optional
+//   "antigravityDataDir": "C:/Users/<you>/.gemini/antigravity-cli"                optional
 // }
-// Executable paths may use whole `*` segments; the newest match is used, because both
-// desktop apps install their CLI under version/hash directories that change on update.
+// Executable paths may use whole `*` segments; the newest match is used, because desktop
+// apps may install their CLI under version/hash directories that change on update.
 //
 // Identity mode additionally writes, under <deployRoot>/config:
 //   controller-host-overlap.json / controller-host-final.json  (host controller identity fragments)
-//   agent-peer-claude-code.json / agent-peer-codex.json        (one peer config per root)
-//   launch-claude-code.mjs / launch-codex.mjs                   (root launch wrappers; no token inside)
+//   agent-peer-claude-code.json / agent-peer-codex.json        (one peer config per root; + antigravity when configured)
+//   launch-claude-code.mjs / launch-codex.mjs                  (root launch wrappers; + antigravity when configured; no token inside)
 // Those are deployment artifacts only; no token content is ever written into a config.
 //
 // First install: files that are machine-specific are created only when missing and never
@@ -85,9 +88,15 @@ export const LAUNCHER_FILE_NAMES = Object.freeze({
   claude: 'launch-claude-code.mjs',
   codex: 'launch-codex.mjs',
 });
+export const ANTIGRAVITY_FILE_NAMES = Object.freeze({
+  token: 'antigravity.token',
+  peer: 'agent-peer-antigravity.json',
+  launcher: 'launch-antigravity.mjs',
+});
 const TOKEN_RE = /^[\x21-\x7e]{24,512}$/;
 const BRIDGE_CREDENTIAL_ENV = /^(DSH_MCP_TOKEN|DSH_BRIDGE_CREDENTIAL_FILE|DSH_BRIDGE_DELEGATED|DSH_BRIDGE_DISABLED)$/i;
 const ROOT_PROVENANCE_ENV = /^(AGENT_BRIDGE_CHAIN|AGENT_BRIDGE_ROOT_TASK)$/i;
+const hasAntigravity = (config) => Boolean(config?.antigravityPluginDir || config?.antigravityExecutable);
 
 export const USAGE = 'usage: node scripts/deploy-local.mjs --config <deploy.json> [--dry-run] [--prepare-only]';
 
@@ -128,7 +137,7 @@ export function validateConfig(config) {
   for (const key of ['deployRoot', 'nodePath', 'bridgeUrl']) {
     if (typeof config[key] !== 'string' || config[key].trim() === '') throw new Error(`deploy config: ${key} is required`);
   }
-  for (const key of ['repo', 'gitExecutable', 'deployRoot', 'nodePath', 'peerConfig', 'credentialFile', 'codexPluginDir', 'codexExecutable', 'codexMarketplace', 'claudeExecutable']) {
+  for (const key of ['repo', 'gitExecutable', 'deployRoot', 'nodePath', 'peerConfig', 'credentialFile', 'codexPluginDir', 'codexExecutable', 'codexMarketplace', 'claudeExecutable', 'antigravityPluginDir', 'antigravityExecutable', 'antigravityDataDir']) {
     if (config[key] !== undefined && !path.isAbsolute(config[key])) throw new Error(`deploy config: ${key} must be absolute`);
   }
   if (config.identity === undefined) return;
@@ -159,15 +168,24 @@ export function identityLayout(config) {
   const legacyTokenFile = config.identity.legacyTokenFile === undefined ? null : path.resolve(config.identity.legacyTokenFile);
   const peerConfigPath = config.peerConfig ?? path.join(config.deployRoot, 'config', 'agent-peer.json');
   const peerDirectory = path.dirname(peerConfigPath);
+  const includeAntigravity = hasAntigravity(config);
+  const tokenFiles = Object.fromEntries(Object.entries(CONTROLLER_TOKEN_NAMES).map(([id, name]) => [id, path.join(credentialDirectory, name)]));
+  const peerFiles = Object.fromEntries(Object.entries(PEER_FILE_NAMES).map(([id, name]) => [id, path.join(peerDirectory, name)]));
+  const launcherFiles = Object.fromEntries(Object.entries(LAUNCHER_FILE_NAMES).map(([id, name]) => [id, path.join(config.deployRoot, 'config', name)]));
+  if (includeAntigravity) {
+    tokenFiles.antigravity = path.join(credentialDirectory, ANTIGRAVITY_FILE_NAMES.token);
+    peerFiles.antigravity = path.join(peerDirectory, ANTIGRAVITY_FILE_NAMES.peer);
+    launcherFiles.antigravity = path.join(config.deployRoot, 'config', ANTIGRAVITY_FILE_NAMES.launcher);
+  }
   return {
     credentialDirectory,
     migrationBackupDirectory,
     legacyTokenFile,
     peerConfigPath,
-    tokenFiles: Object.fromEntries(Object.entries(CONTROLLER_TOKEN_NAMES).map(([id, name]) => [id, path.join(credentialDirectory, name)])),
-    peerFiles: Object.fromEntries(Object.entries(PEER_FILE_NAMES).map(([id, name]) => [id, path.join(peerDirectory, name)])),
+    tokenFiles,
+    peerFiles,
     hostFiles: Object.fromEntries(Object.entries(IDENTITY_FILE_NAMES).map(([id, name]) => [id, path.join(config.deployRoot, 'config', name)])),
-    launcherFiles: Object.fromEntries(Object.entries(LAUNCHER_FILE_NAMES).map(([id, name]) => [id, path.join(config.deployRoot, 'config', name)])),
+    launcherFiles,
   };
 }
 
@@ -269,6 +287,7 @@ function hostFragment(layout, includeLegacy) {
   const controllers = [
     { id: 'claude-code', tokenFile: slash(layout.tokenFiles.claude) },
     { id: 'codex', tokenFile: slash(layout.tokenFiles.codex) },
+    ...(layout.tokenFiles.antigravity ? [{ id: 'antigravity', tokenFile: slash(layout.tokenFiles.antigravity) }] : []),
     { id: 'operator', tokenFile: slash(layout.tokenFiles.operator), admin: true },
   ];
   if (includeLegacy) controllers.push({ id: 'legacy', tokenFile: slash(layout.legacyTokenFile), admin: true });
@@ -276,16 +295,17 @@ function hostFragment(layout, includeLegacy) {
 }
 
 async function readExistingPeerFiles(layout) {
-  return {
-    shared: await readJsonIfExists(layout.peerConfigPath, 'peer config'),
-    claude: await readJsonIfExists(layout.peerFiles.claude, 'Claude peer config'),
-    codex: await readJsonIfExists(layout.peerFiles.codex, 'Codex peer config'),
-  };
+  const entries = { shared: await readJsonIfExists(layout.peerConfigPath, 'peer config') };
+  for (const [id, file] of Object.entries(layout.peerFiles)) {
+    entries[id] = await readJsonIfExists(file, `${id} peer config`);
+  }
+  return entries;
 }
 
 /** Resolve the shared stateDir and validate (without writing) existing per-root configs. */
 export async function inspectPeerConfigs(config, layout, readFiles = null) {
   const files = readFiles ?? await readExistingPeerFiles(layout);
+  const peerIds = Object.keys(layout.peerFiles);
   let stateDir = null;
   if (files.shared !== null) {
     if (typeof files.shared.stateDir !== 'string' || !path.isAbsolute(files.shared.stateDir)) {
@@ -293,9 +313,9 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
     }
     stateDir = path.resolve(files.shared.stateDir);
   } else {
-    for (const id of ['claude', 'codex']) {
+    for (const id of peerIds) {
       const existing = files[id];
-      if (existing !== null) {
+      if (existing !== null && existing !== undefined) {
         if (typeof existing.stateDir !== 'string' || !path.isAbsolute(existing.stateDir)) {
           throw new Error(`deploy config: existing ${id} peer config has no absolute stateDir: ${layout.peerFiles[id]}`);
         }
@@ -306,18 +326,31 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   }
   if (stateDir === null) stateDir = path.join(config.deployRoot, 'state');
 
+  const defaultRecords = {
+    enabled: true,
+    dirName: '.agent-bridge/records',
+    retainDays: 3,
+    disputedRetainDays: 30,
+    sweepIntervalMinutes: 60,
+    claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')),
+    ...(hasAntigravity(config) || config.antigravityDataDir
+      ? { antigravityDataDir: slash(config.antigravityDataDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli')) }
+      : {}),
+  };
   const base = files.shared === null
     ? {
         schemaVersion: 1,
         peers: {},
-        records: { enabled: true, dirName: '.agent-bridge/records', retainDays: 3, disputedRetainDays: 30, sweepIntervalMinutes: 60, claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')) },
+        records: defaultRecords,
         limits: { timeoutMs: 1800000, maxConcurrentJobs: 3 },
       }
     : structuredClone(files.shared);
   base.schemaVersion = 1;
   base.stateDir = slash(stateDir);
   if (!isPlainObject(base.peers)) throw new Error(`deploy config: existing peer config has an invalid peers field: ${layout.peerConfigPath}`);
-  if (!isPlainObject(base.records)) base.records = { enabled: true, dirName: '.agent-bridge/records', retainDays: 3, disputedRetainDays: 30, sweepIntervalMinutes: 60, claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')) };
+  if (!isPlainObject(base.records)) base.records = defaultRecords;
+  else if (config.antigravityDataDir) base.records.antigravityDataDir = slash(config.antigravityDataDir);
+  else if (hasAntigravity(config) && base.records.antigravityDataDir === undefined) base.records.antigravityDataDir = slash(path.join(os.homedir(), '.gemini', 'antigravity-cli'));
   if (!isPlainObject(base.limits)) base.limits = { timeoutMs: 1800000, maxConcurrentJobs: 3 };
   if (config.codexExecutable) {
     base.peers.codex = { ...(isPlainObject(base.peers.codex) ? base.peers.codex : {}), executable: slash(config.codexExecutable), delegateSandbox: 'workspace-write', readOnlyDisablePlugins: [config.codexPluginId ?? 'agent-bridge@personal'], threadSection: 'Agent Bridge', threadNamePrefix: '[agent-bridge]' };
@@ -325,10 +358,25 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
   if (config.claudeExecutable) {
     base.peers['claude-code'] = { ...(isPlainObject(base.peers['claude-code']) ? base.peers['claude-code'] : {}), executable: slash(config.claudeExecutable), delegatePermissionMode: 'acceptEdits', delegateAllowedTools: ['mcp__plugin_agent-bridge_dsh_project', 'mcp__plugin_agent-bridge_agent_peer', 'Bash'] };
   }
+  if (config.antigravityExecutable) {
+    const existingAgy = isPlainObject(base.peers.antigravity) ? base.peers.antigravity : {};
+    base.peers.antigravity = {
+      ...existingAgy,
+      executable: slash(config.antigravityExecutable),
+      delegateMode: existingAgy.delegateMode ?? 'accept-edits',
+      ...(config.antigravityPluginDir
+        ? {
+            readOnlyAgent: existingAgy.readOnlyAgent ?? 'agent-bridge-readonly',
+            readOnlyWebAgent: existingAgy.readOnlyWebAgent ?? 'agent-bridge-readonly-web',
+          }
+        : {}),
+      delegateAllowedPermissions: existingAgy.delegateAllowedPermissions ?? ['mcp(agent-bridge_dsh_project/*)', 'mcp(agent-bridge_agent_peer/*)'],
+    };
+  }
 
-  for (const id of ['claude', 'codex']) {
+  for (const id of peerIds) {
     const existing = files[id];
-    if (existing === null) continue;
+    if (existing === null || existing === undefined) continue;
     if (typeof existing.stateDir !== 'string' || !path.isAbsolute(existing.stateDir) || !samePath(existing.stateDir, stateDir)) {
       throw new Error(`deploy config: existing ${id} peer config does not use the shared stateDir ${stateDir}: ${layout.peerFiles[id]}`);
     }
@@ -341,11 +389,12 @@ export async function inspectPeerConfigs(config, layout, readFiles = null) {
 }
 
 async function writePeerConfigs(config, layout, plan, dryRun, step) {
+  const peerIds = Object.keys(layout.peerFiles);
   if (dryRun) {
-    for (const id of ['claude', 'codex']) if (plan.files[id] === null) step(`would create ${id} root peer config ${layout.peerFiles[id]}`);
+    for (const id of peerIds) if (plan.files[id] === null) step(`would create ${id} root peer config ${layout.peerFiles[id]}`);
     return;
   }
-  for (const id of ['claude', 'codex']) {
+  for (const id of peerIds) {
     if (plan.files[id] !== null) continue;
     await mkdir(path.dirname(layout.peerFiles[id]), { recursive: true });
     await mkdir(plan.stateDir, { recursive: true });
@@ -416,6 +465,65 @@ async function applyCodexMcp(plan, dryRun, step) {
   }
 }
 
+function antigravityMcpValue(template, config, pluginDir, antigravityPeerConfig, credentialFile) {
+  if (!isPlainObject(template?.mcpServers?.dsh_project) || !isPlainObject(template?.mcpServers?.agent_peer)) {
+    throw new Error('deploy config: .antigravity-mcp.json must contain the dsh_project and agent_peer carrier entries');
+  }
+  const desired = structuredClone(template);
+  desired.mcpServers.dsh_project = {
+    ...template.mcpServers.dsh_project,
+    command: slash(config.nodePath),
+    args: [slash(path.join(pluginDir, 'bin', 'bridge.mjs'))],
+  };
+  desired.mcpServers.agent_peer = {
+    ...template.mcpServers.agent_peer,
+    command: slash(config.nodePath),
+    args: [slash(path.join(pluginDir, 'bin', 'peer-mcp.mjs'))],
+    env: {
+      ...(isPlainObject(template.mcpServers.agent_peer.env) ? template.mcpServers.agent_peer.env : {}),
+      AGENT_BRIDGE_SELF: 'antigravity',
+      AGENT_PEER_CONFIG: slash(antigravityPeerConfig),
+    },
+  };
+  for (const entry of Object.values(desired.mcpServers)) {
+    if (!isPlainObject(entry.env)) entry.env = {};
+    for (const key of Object.keys(entry.env)) if (BRIDGE_CREDENTIAL_ENV.test(key) || /^DSH_BRIDGE_URL$/i.test(key)) delete entry.env[key];
+    entry.env.DSH_BRIDGE_URL = config.bridgeUrl;
+    if (credentialFile) entry.env.DSH_BRIDGE_CREDENTIAL_FILE = slash(credentialFile);
+  }
+  return desired;
+}
+
+async function inspectAntigravityMcp(config, pluginDir, antigravityPeerConfig, credentialFile, packageRoot) {
+  const template = await readJsonIfExists(path.join(packageRoot, '.antigravity-mcp.json'), 'Antigravity MCP template');
+  if (template === null) throw new Error('deploy config: .antigravity-mcp.json is missing from the package');
+  const desired = antigravityMcpValue(template, config, pluginDir, antigravityPeerConfig, credentialFile);
+  const file = path.join(config.antigravityPluginDir, 'mcp_config.json');
+  const existing = await readJsonIfExists(file, 'existing Antigravity MCP config');
+  return { file, desired, existing };
+}
+
+async function applyAntigravityMcp(plan, dryRun, step) {
+  if (plan.existing === null) {
+    if (!dryRun) {
+      await mkdir(path.dirname(plan.file), { recursive: true });
+      await writeFile(plan.file, `${JSON.stringify(plan.desired, null, 2)}\n`, 'utf8');
+    }
+    step(`created Antigravity MCP config ${plan.file}`);
+    return;
+  }
+  const merged = {
+    ...plan.existing,
+    mcpServers: { ...(isPlainObject(plan.existing.mcpServers) ? plan.existing.mcpServers : {}), ...plan.desired.mcpServers },
+  };
+  if (JSON.stringify(merged) !== JSON.stringify(plan.existing)) {
+    if (!dryRun) await writeFile(plan.file, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+    step(`updated Antigravity MCP config ${plan.file}`);
+  } else {
+    step(`validated Antigravity MCP config ${plan.file}`);
+  }
+}
+
 function launcherSource({ cli, tokenFile, peerConfigPath, bridgeUrl }) {
   const lines = [
     '#!/usr/bin/env node',
@@ -451,8 +559,11 @@ async function writeLaunchers(config, layout, dryRun, step, resolveExecutable, p
   const cli = {
     claude: config.claudeExecutable ? await resolveExecutable(config.claudeExecutable) : 'claude',
     codex: config.codexExecutable ? await resolveExecutable(config.codexExecutable) : 'codex',
+    ...(layout.launcherFiles.antigravity
+      ? { antigravity: config.antigravityExecutable ? await resolveExecutable(config.antigravityExecutable) : 'agy' }
+      : {}),
   };
-  for (const id of ['claude', 'codex']) {
+  for (const id of Object.keys(layout.launcherFiles)) {
     if (preserveExisting && await exists(layout.launcherFiles[id])) continue;
     const source = launcherSource({
       // The launcher spawns exactly one root CLI string; pass only this root's selection.
@@ -522,6 +633,15 @@ export async function deploy(options = {}) {
   const codexMcpPlan = prepareOnly || layout === null || !config.codexPluginDir
     ? null
     : await inspectCodexMcp(config, path.join(config.deployRoot, 'plugin'), layout.peerFiles.codex, config.repo ?? packageRoot);
+  const antigravityMcpPlan = prepareOnly || !config.antigravityPluginDir
+    ? null
+    : await inspectAntigravityMcp(
+        config,
+        path.join(config.deployRoot, 'plugin'),
+        layout?.peerFiles.antigravity ?? (config.peerConfig ?? path.join(config.deployRoot, 'config', 'agent-peer.json')),
+        layout?.tokenFiles.antigravity ?? config.credentialFile ?? null,
+        config.repo ?? packageRoot,
+      );
 
   // ── 1. stage the plugin copy ────────────────────────────────────────────────
   const label = config.repo ? 'git' : 'package';
@@ -539,7 +659,7 @@ export async function deploy(options = {}) {
   const preparedPluginDir = prepareOnly ? path.join(config.deployRoot, `plugin.prepared-${randomBytes(6).toString('hex')}`) : null;
   const pluginDir = preparedPluginDir ?? path.join(config.deployRoot, 'plugin');
   const preparedLauncherFiles = prepareOnly
-    ? Object.fromEntries(Object.entries(LAUNCHER_FILE_NAMES).map(([id, name]) => [id, path.join(pluginDir, 'config', name)]))
+    ? Object.fromEntries(Object.entries(layout.launcherFiles).map(([id, file]) => [id, path.join(pluginDir, 'config', path.basename(file))]))
     : null;
   const stageDir = prepareOnly ? `${pluginDir}.stage` : path.join(config.deployRoot, `plugin.stage-${revision}`);
   const prevDir = path.join(config.deployRoot, 'plugin.prev');
@@ -619,11 +739,31 @@ export async function deploy(options = {}) {
     const peers = {};
     if (config.codexExecutable) peers.codex = { executable: slash(config.codexExecutable), delegateSandbox: 'workspace-write', readOnlyDisablePlugins: [config.codexPluginId ?? 'agent-bridge@personal'], threadSection: 'Agent Bridge', threadNamePrefix: '[agent-bridge]' };
     if (config.claudeExecutable) peers['claude-code'] = { executable: slash(config.claudeExecutable), delegatePermissionMode: 'acceptEdits', delegateAllowedTools: ['mcp__plugin_agent-bridge_dsh_project', 'mcp__plugin_agent-bridge_agent_peer', 'Bash'] };
+    if (config.antigravityExecutable) {
+      peers.antigravity = {
+        executable: slash(config.antigravityExecutable),
+        delegateMode: 'accept-edits',
+        ...(config.antigravityPluginDir
+          ? { readOnlyAgent: 'agent-bridge-readonly', readOnlyWebAgent: 'agent-bridge-readonly-web' }
+          : {}),
+        delegateAllowedPermissions: ['mcp(agent-bridge_dsh_project/*)', 'mcp(agent-bridge_agent_peer/*)'],
+      };
+    }
     const peerConfig = {
       schemaVersion: 1,
       stateDir: slash(path.join(config.deployRoot, 'state')),
       peers,
-      records: { enabled: true, dirName: '.agent-bridge/records', retainDays: 3, disputedRetainDays: 30, sweepIntervalMinutes: 60, claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')) },
+      records: {
+        enabled: true,
+        dirName: '.agent-bridge/records',
+        retainDays: 3,
+        disputedRetainDays: 30,
+        sweepIntervalMinutes: 60,
+        claudeProjectsDir: slash(path.join(os.homedir(), '.claude', 'projects')),
+        ...(hasAntigravity(config) || config.antigravityDataDir
+          ? { antigravityDataDir: slash(config.antigravityDataDir ?? path.join(os.homedir(), '.gemini', 'antigravity-cli')) }
+          : {}),
+      },
       bridge: { url: config.bridgeUrl, ...(config.credentialFile ? { credentialFile: slash(config.credentialFile) } : {}) },
       limits: { timeoutMs: 1800000, maxConcurrentJobs: 3 },
     };
@@ -705,7 +845,33 @@ export async function deploy(options = {}) {
   } else {
     step('claudeExecutable not set: Claude Code keeps running its cached copy until `claude plugin update` runs');
   }
-  step(`done (${manifest.version}, ${revision}). Restart the Claude desktop app and start new Codex sessions to load this version.`);
+
+  // ── 6. Antigravity ──────────────────────────────────────────────────────────
+  if (config.antigravityPluginDir) {
+    await applyAntigravityMcp(antigravityMcpPlan, dryRun, step);
+    if (!dryRun) {
+      await mkdir(config.antigravityPluginDir, { recursive: true });
+      const agyManifestPath = path.join(pluginDir, '.antigravity-plugin', 'plugin.json');
+      const agyManifest = JSON.parse(await readFile(agyManifestPath, 'utf8'));
+      await writeJson(path.join(config.antigravityPluginDir, 'plugin.json'), agyManifest);
+      await rm(path.join(config.antigravityPluginDir, 'skills'), { recursive: true, force: true });
+      await cp(path.join(pluginDir, 'skills'), path.join(config.antigravityPluginDir, 'skills'), { recursive: true });
+      const agyAgentsSource = path.join(pluginDir, '.antigravity-plugin', 'agents');
+      await rm(path.join(config.antigravityPluginDir, 'agents'), { recursive: true, force: true });
+      if (await exists(agyAgentsSource)) {
+        await cp(agyAgentsSource, path.join(config.antigravityPluginDir, 'agents'), { recursive: true });
+      }
+    }
+    step(`refreshed Antigravity plugin manifest, skills and agents in ${config.antigravityPluginDir}`);
+    if (config.antigravityExecutable) {
+      const agy = await resolveExecutable(config.antigravityExecutable);
+      if (!dryRun) {
+        run(agy, ['plugin', 'validate', config.antigravityPluginDir]);
+      }
+      step(`validated Antigravity plugin in ${config.antigravityPluginDir} (${agy})`);
+    }
+  }
+  step(`done (${manifest.version}, ${revision}). Restart the Claude desktop app and start new Codex/Antigravity sessions to load this version.`);
   return { dryRun, identity: layout !== null, layout };
 }
 

@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "dsh_project": {
+      "command": "node",
+      "args": [
+        "./bin/bridge.mjs"
+      ],
+      "env": {
+        "DSH_BRIDGE_URL": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
+        "DSH_BRIDGE_CREDENTIAL_FILE": ""
+      }
+    },
+    "agent_peer": {
+      "command": "node",
+      "args": [
+        "./bin/peer-mcp.mjs"
+      ],
+      "env": {
+        "AGENT_BRIDGE_SELF": "antigravity",
+        "AGENT_PEER_CONFIG": "",
+        "DSH_BRIDGE_URL": "http://127.0.0.1:3080/mcp/codex-bridge-v1",
+        "DSH_BRIDGE_CREDENTIAL_FILE": ""
+      }
+    }
+  }
+}

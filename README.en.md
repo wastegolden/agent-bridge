@@ -2,16 +2,16 @@
 
 # Agent Bridge
 
-Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to the other harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 2.0.0, MIT.
+Agent Bridge lets **Claude Code**, **Codex**, **Antigravity** and **DeepSeek Harness (DSH)** call each other. The harness you are talking to is the **root controller** of that task: it hands bounded implementation to DSH Flash workers, and consultation, independent review or a whole sub-project to another peer harness. There is exactly one root controller per task, DSH worker tasks carry explicit read/write roots, a tool allowlist and a budget, and the delegation chain is enforced by the server, so delegation loops cannot form. Version 2.1.0, MIT.
 
-> Independent project; not affiliated with, or endorsed by, DeepSeek, OpenAI or Anthropic.
+> Independent project; not affiliated with, or endorsed by, DeepSeek, OpenAI, Anthropic or Google.
 
 ## How it fits together
 
 ```
                       you
                        │
-        root controller: Claude Code or Codex (exactly one per task)
+  root controller: Claude Code / Codex / Antigravity (exactly one per task)
                        │
         ┌──────────────┴──────────────┐
         │                             │
@@ -19,7 +19,7 @@ Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call
    MCP stdio → HTTP              MCP stdio
         │                             │
         ▼                             ▼
-  DSH host bridge            the other harness's headless CLI
+  DSH host bridge            another harness's headless CLI
   /mcp/codex-bridge-v1       consult / review (read-only) / delegate (sub-controller)
         │
         ▼
@@ -29,8 +29,8 @@ Agent Bridge lets **Claude Code**, **Codex** and **DeepSeek Harness (DSH)** call
 | Part | Where | What it does |
 |---|---|---|
 | DSH host bridge | `dsh-host/index.cjs`, `src/*` | A DSH plugin that serves the MCP endpoint `/mcp/codex-bridge-v1` on the DSH host (default `http://127.0.0.1:3080`), authenticated with a bearer token |
-| `dsh_project` | MCP server in both plugin manifests | Both roots use the stdio carrier `bin/bridge.mjs`, read their own credential file and forward to the host HTTP endpoint |
-| `agent_peer` | `bin/peer-mcp.mjs`, `src/peer/*` | Runs the other harness through its headless CLI for consult / read-only review / sub-controller delegation, with a job ledger, chain rules and closeout records |
+| `dsh_project` | MCP server in each plugin manifest | Each root uses the stdio carrier `bin/bridge.mjs`, reads its own credential file and forwards to the host HTTP endpoint |
+| `agent_peer` | `bin/peer-mcp.mjs`, `src/peer/*` | Runs another peer harness (Claude Code, Codex or Antigravity) through its headless CLI for consult / read-only review / sub-controller delegation, with a job ledger, chain rules and closeout records |
 | Skills | `skills/agent-bridge-routing`, `skills/dsh-project-execution` | Routing rules and the DSH execution discipline |
 
 ### DSH host bridge
@@ -42,7 +42,7 @@ The host bridge is a DSH plugin. It mounts the MCP endpoint `/mcp/codex-bridge-v
 - network access is declared by the packet too, and is available only when granted;
 - the lifecycle is review → integrate → acknowledge → archive / cleanup, and every step requires the previous step's real evidence.
 
-It exposes 20 `bridge_*` tools (6 read, 1 submit, 13 mutate; the host's `bridge_capabilities` reports `version` **2.0.0**, the same as the plugin version):
+It exposes 20 `bridge_*` tools (6 read, 1 submit, 13 mutate; the host's `bridge_capabilities` reports `version` **2.1.0**, the same as the plugin version):
 
 - tasks: `bridge_submit`, `bridge_check`, `bridge_result`, `bridge_dossier`
 - authorization: `bridge_approve`, `bridge_clarify`
@@ -60,7 +60,7 @@ Both clients run `bin/bridge.mjs` to forward MCP stdio to the host HTTP endpoint
 
 ### agent_peer
 
-`agent_peer` (`bin/peer-mcp.mjs`) runs the other harness through its headless CLI (`codex exec` / `claude -p`) and exposes 9 tools:
+`agent_peer` (`bin/peer-mcp.mjs`) runs another harness through its headless CLI (`codex exec` / `claude -p` / `agy --input-format stream-json --output-format stream-json`) and exposes 9 tools:
 
 - `peer_capabilities`: where I sit on the chain, whom I may call right now, which modes are allowed, and each peer's default model, default reasoning effort and allowed effort list (`defaultModel`, `defaultReasoningEffort`, `reasoningEfforts`)
 - `peer_ask`, `peer_check`, `peer_result`, `peer_cancel`, `peer_list`: job lifecycle
@@ -95,7 +95,7 @@ For compatibility with existing installs the persisted ids are still the old one
 
 ### 1. DSH host bridge
 
-Check what you have first: call `bridge_capabilities` from a connected Claude / Codex. **Only** `controllerIdentity.enabled === true` together with `controllerIdentity.schemaVersion === 1` means the host already runs the controller-identity version, so you can skip this section; if either is missing (for example an older host without `controllerIdentity`, or a `schemaVersion` other than 1), replace the old install as below. Do not use the `version` field in place of those two checks; the current host and plugin should both report `2.0.0`, but a version string is not evidence of identity support.
+Check what you have first: call `bridge_capabilities` from a connected Claude / Codex / Antigravity. **Only** `controllerIdentity.enabled === true` together with `controllerIdentity.schemaVersion === 1` means the host already runs the controller-identity version, so you can skip this section; if either is missing (for example an older host without `controllerIdentity`, or a `schemaVersion` other than 1), replace the old install as below. Do not use the `version` field in place of those two checks; the current host and plugin should both report `2.1.0`, but a version string is not evidence of identity support.
 
 When replacing an older install:
 
@@ -216,6 +216,14 @@ The first command defaults to dry-run; explicit `--dry-run` is also supported. T
 codex plugin add agent-bridge@personal
 ```
 
+### 4b. Antigravity plugin and headless CLI
+
+Antigravity works in **both** directions: as a **root controller** via a native Antigravity plugin, and as a **peer target** via the headless `agy` CLI:
+
+- **Opt-in local deployment**: add `antigravityPluginDir` (e.g. `C:/Users/<you>/.gemini/config/plugins/agent-bridge`) and/or `antigravityExecutable` (e.g. `C:/Users/<you>/AppData/Local/agy/bin/agy.exe`) to `deploy.json`, then run `node scripts/deploy-local.mjs --config <deploy.json>`. When omitted, Claude+Codex deployments remain 100% unchanged; when present, the script generates `antigravity.token`, `agent-peer-antigravity.json`, `launch-antigravity.mjs`, adds `antigravity` to the host controller fragments, deploys the native plugin (`plugin.json`, `mcp_config.json`, `skills/`, `agents/agent-bridge-readonly.md`, `agents/agent-bridge-readonly-web.md`), and runs `agy plugin validate`.
+- **Read-only and delegate boundaries**: `consult` / `review` runs with `--disable-slash-commands`, an optional read-only agent (`readOnlyAgent` = `agent-bridge-readonly` with `read_file` only by default; switched to `readOnlyWebAgent` = `agent-bridge-readonly-web` adding `search_web` when the controller passes `webSearch: true`), and session-only `--settings` (`allowNonWorkspaceAccess: false`, denying `write_file(*)`, `command(*)`, `mcp(*)`, `execute_url(*)`, `download_url(*)`). The per-call `peer_ask.webSearch` toggle also works for `claude-code` (`WebSearch`/`WebFetch`) and is explicitly refused (`PEER_ARGS_INVALID`) on `codex` and in `delegate` mode. Like Codex, an Antigravity `delegate` keeps its installed plugins/MCP config, uses `delegateMode` (`accept-edits` or `auto`), optional `--sandbox` (`delegateSandbox: true`), and `delegateAllowedPermissions` (defaulting to `mcp(agent-bridge_dsh_project/*)` and `mcp(agent-bridge_agent_peer/*)`), while inheriting the root credential and chain.
+- **Session cleanup**: temporary `agy` CLI sessions under `records.antigravityDataDir` (default `~/.gemini/antigravity-cli`: `conversations/<id>.db`, `brain/<id>/`, `presence/<id>.lock`) are deleted by the retention sweeper once their closeout record becomes due.
+
 ### 5. agent-peer config
 
 Each root gets its **own separate** agent-peer config file: Claude's `peer_config` points at `config/agent-peer-claude-code.json` and Codex's `AGENT_PEER_CONFIG` at `config/agent-peer-codex.json`. Both files share one `stateDir` (so both roots see the same job and chain ledger), but each `bridge.credentialFile` points at that root's own controller token file (`credentials/claude-code.token` / `credentials/codex.token`). Never hand one file with a `credentialFile` to both roots: one root would read the other's credential. The template below uses `<root-controller-id>`; the deploy tooling generates one copy per root. If the machine still has the old single `config/agent-peer.json`, the deploy tooling derives each missing per-root config from it and points `bridge.credentialFile` at that root's own token file; an existing per-root config is validated and kept.
@@ -240,6 +248,16 @@ Each root gets its **own separate** agent-peer config file: Claude's `peer_confi
         "mcp__plugin_agent-bridge_agent_peer",
         "Bash"
       ]
+    },
+    "antigravity": {
+      "executable": "C:/Users/<you>/AppData/Local/agy/bin/agy.exe",
+      "readOnlyAgent": "agent-bridge-readonly",
+      "readOnlyWebAgent": "agent-bridge-readonly-web",
+      "delegateMode": "accept-edits",
+      "delegateAllowedPermissions": [
+        "mcp(agent-bridge_dsh_project/*)",
+        "mcp(agent-bridge_agent_peer/*)"
+      ]
     }
   },
   "records": {
@@ -248,7 +266,8 @@ Each root gets its **own separate** agent-peer config file: Claude's `peer_confi
     "retainDays": 3,
     "disputedRetainDays": 30,
     "sweepIntervalMinutes": 60,
-    "claudeProjectsDir": "C:/Users/<you>/.claude/projects"
+    "claudeProjectsDir": "C:/Users/<you>/.claude/projects",
+    "antigravityDataDir": "C:/Users/<you>/.gemini/antigravity-cli"
   },
   "bridge": { "url": "http://127.0.0.1:3080/mcp/codex-bridge-v1", "credentialFile": "<private>/credentials/<root-controller-id>.token" },
   "limits": { "timeoutMs": 1800000, "maxConcurrentJobs": 3 }
@@ -260,10 +279,11 @@ The main keys:
 - `stateDir`: the job ledger, the chain ledger and the records index.
 - `peers.<name>.executable`: absolute path of the peer headless CLI; whole `*` segments pick the newest version. It must be the real executable, not a `.cmd` / `.bat` shim (otherwise the config is refused).
 - `peers.codex.delegateSandbox`: the Codex sandbox for `delegate` (`read-only` or `workspace-write`). `readOnlyDisablePlugins` disables the listed plugins in read-only runs, so a reviewer cannot act through MCP tools.
-- `peers.codex.model` / `peers.codex.reasoningEffort` and `peers.claude-code.model` / `peers.claude-code.effort`: optional **defaults** that a single `peer_ask` may override with the same argument; when neither is passed the CLI's own default applies.
-- `peers.<target>.efforts`: optional, replaces the allowed reasoning-effort list for that target (1 to 16 unique strings, each matching `^[a-z][a-z0-9_-]{0,31}$`). When absent the built-in list applies: codex `minimal, low, medium, high, xhigh, max, ultra`; claude-code `low, medium, high, xhigh, max`. A per-call value outside the list is refused with `PEER_ARGS_INVALID` (field `reasoningEffort`), a config default outside it with `PEER_CONFIG_INVALID`.
+- `peers.codex.model` / `peers.codex.reasoningEffort`, `peers.claude-code.model` / `peers.claude-code.effort` and `peers.antigravity.model` / `peers.antigravity.effort`: optional **defaults** that a single `peer_ask` may override with the same argument; when neither is passed the CLI's own default applies.
+- `peers.<target>.efforts`: optional, replaces the allowed reasoning-effort list for that target (1 to 16 unique strings, each matching `^[a-z][a-z0-9_-]{0,31}$`). When absent the built-in list applies: codex `minimal, low, medium, high, xhigh, max, ultra`; claude-code / antigravity `low, medium, high, xhigh, max`. A per-call value outside the list is refused with `PEER_ARGS_INVALID` (field `reasoningEffort`), a config default outside it with `PEER_CONFIG_INVALID`.
 - `peers.claude-code.delegatePermissionMode` / `delegateAllowedTools`: permission mode and allowed tools for `delegate`; `review` / `consult` use the read-only tool set and `--no-session-persistence`.
-- `records`: record directory name, retention after acceptance, retention for failed/disputed work, sweep interval, and the Claude sessions directory.
+- `peers.antigravity.readOnlyAgent` / `readOnlyWebAgent` / `delegateMode` / `delegateSandbox` / `delegateAllowedPermissions`: local read-only agent, web-enabled read-only agent, `delegate` mode (`accept-edits` / `auto`), optional `--sandbox`, and allowed Antigravity permission rules for `delegate`.
+- `records`: record directory name, retention after acceptance, retention for failed/disputed work, sweep interval, Claude sessions directory, and Antigravity CLI data directory (`antigravityDataDir`).
 - `bridge`: the DSH endpoint used by the cleanup sweeper. Roots read their file through `DSH_BRIDGE_CREDENTIAL_FILE` or their own `credentialFile`; delegates keep priority for the explicitly injected `DSH_MCP_TOKEN`.
 - `limits`: timeout, concurrency and the other bounds.
 
@@ -271,7 +291,7 @@ There is deliberately no free-form argument list: every CLI flag is generated fr
 
 ## Verify
 
-1. Call `bridge_capabilities`: the host should report `version` `2.0.0` (the same as the plugin version). `controllerIdentity.self` / `admin` must match the controller token you are using, `controllers` lists the configured IDs, and `controllerIdentity.enabled` is `true` with `schemaVersion` `1`.
+1. Call `bridge_capabilities`: the host should report `version` `2.1.0` (the same as the plugin version). `controllerIdentity.self` / `admin` must match the controller token you are using, `controllers` lists the configured IDs, and `controllerIdentity.enabled` is `true` with `schemaVersion` `1`.
 2. Call `peer_capabilities`: `self` should be `claude-code` on the Claude side and `codex` on the Codex side; `chain` shows your position, and every peer/mode pair states whether it is allowed and, if not, with which error code.
 3. Run one disposable delegate in each direction. Claude → Codex: confirm the delegate inherited the root's (Claude's) non-administrator identity and `via` chain and can complete one cheap DSH submission; the Codex side keeps its own MCP configuration, so do not claim Codex excludes the user's other MCP servers. Codex → Claude: confirm the Claude Code delegate sees only the plugin's two MCP servers and that the user's other MCP servers are absent (the explicit narrowing since 1.7.0), and that it can still submit one cheap DSH task.
 

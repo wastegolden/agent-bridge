@@ -16,9 +16,9 @@
 //
 // This module is pure: no I/O, no process access. Callers pass the environment in.
 
-export const HARNESSES = Object.freeze(['claude-code', 'codex', 'dsh']);
+export const HARNESSES = Object.freeze(['claude-code', 'codex', 'antigravity', 'dsh']);
 /** Harnesses a peer call may target. DSH work goes through the bridge_* tools instead. */
-export const PEER_TARGETS = Object.freeze(['claude-code', 'codex']);
+export const PEER_TARGETS = Object.freeze(['claude-code', 'codex', 'antigravity']);
 export const PEER_MODES = Object.freeze(['consult', 'review', 'delegate']);
 
 export const ENV_KEYS = Object.freeze({

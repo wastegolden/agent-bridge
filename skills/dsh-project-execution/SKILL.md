@@ -1,23 +1,23 @@
 ---
 name: dsh-project-execution
-description: Coordinate bounded project work through the DSH bridge (dsh_project bridge_* tools) by decomposing it into task packets, gating risky work on a returned understanding, running parallel isolated worktrees, reviewing exact commits, integrating verified heads and cleaning up owned tasks. Use when work should be delegated to DSH (DeepSeek Harness) workers and coordinated rather than done inline, whether the controller is Codex or Claude Code.
+description: Coordinate bounded project work through the DSH bridge (dsh_project bridge_* tools) by decomposing it into task packets, gating risky work on a returned understanding, running parallel isolated worktrees, reviewing exact commits, integrating verified heads and cleaning up owned tasks. Use when work should be delegated to DSH (DeepSeek Harness) workers and coordinated rather than done inline, whether the controller is Codex, Claude Code or Antigravity.
 ---
 
 # DSH project execution
 
-The **controller** — whichever harness submits the task, Codex or Claude Code, exactly
-one per task — is the planner, reviewer and integrator. DSH workers execute bounded
+The **controller** — whichever harness submits the task, Codex, Claude Code or Antigravity,
+exactly one per task — is the planner, reviewer and integrator. DSH workers execute bounded
 tasks. For this user's installation, the only authorized DSH model for coding,
 investigation, review and repair is DeepSeek Flash (the `flash` route that
 `bridge_models` advertises, e.g. `deepseek-official/deepseek-flash` or
 `deepseek-official/deepseek-v4-flash` depending on the DSH version). Use Flash only;
 do not use Pro or another DSH model unless the user explicitly changes this
 restriction. If Flash is unavailable, report the blocker without switching models.
-The controller's own native subagents (Codex Astra, Claude Code subagents) run under
-the controller's model controls and are never forwarded into DSH. Prefer delegating
-bounded development work to Flash; the controller primarily plans, checks, tests and
-integrates the results. Cross-harness work (asking the other harness) is covered by
-the `agent-bridge-routing` skill.
+The controller's own native subagents (Codex Astra, Claude Code subagents, Antigravity
+subagents) run under the controller's model controls and are never forwarded into DSH.
+Prefer delegating bounded development work to Flash; the controller primarily plans,
+checks, tests and integrates the results. Cross-harness work (asking another harness) is
+covered by the `agent-bridge-routing` skill.
 
 Use this skill when a request should be split into delegated, verifiable work:
 multi-file changes, independent review, parallel investigation, or a project that
@@ -29,8 +29,8 @@ controller.
 
 Several controllers may share one DSH host. Ownership is **server-enforced from the
 bearer credential** (`credential-principal`): `task.submittedBy` is the authenticated
-controller ID and is immutable. `metadata.controller` (`"codex"` or `"claude-code"`)
-and `parentTaskId` are only audit/coordination hints and never grant authority. Use a
+controller ID and is immutable. `metadata.controller` (`"codex"`, `"claude-code"` or
+`"antigravity"`) and `parentTaskId` are only audit/coordination hints and never grant authority. Use a
 project-specific `projectId`; act (approve, clarify, follow up, acknowledge, archive,
 clean up) only on tasks bound to your controller ID. An administrator may act on a
 foreign or historical task only with an explicit `override:{reason}`, which is durable

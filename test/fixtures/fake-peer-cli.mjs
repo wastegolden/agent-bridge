@@ -1,6 +1,7 @@
-// Offline stand-in for the codex / claude CLIs used by test/peer.test.mjs.
-// argv[0] === 'exec'  -> behaves like `codex exec --json ... -o <file> -`
-// argv[0] === '-p'    -> behaves like `claude -p --output-format json ...`
+// Offline stand-in for the codex / claude / agy CLIs used by peer tests.
+// argv[0] === 'exec'            -> behaves like `codex exec --json ... -o <file> -`
+// argv[0] === '-p'              -> behaves like `claude -p --output-format json ...`
+// argv[0] === '--input-format'  -> behaves like `agy --input-format stream-json --output-format stream-json ...`
 // The prompt arrives on stdin. Prompt markers:
 //   SLEEP      never finishes on its own (cancel / timeout tests)
 //   FAIL       reports a model-side error
@@ -8,10 +9,28 @@
 import { writeFileSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
-let prompt = '';
+let rawStdin = '';
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { prompt += chunk; });
+process.stdin.on('data', (chunk) => { rawStdin += chunk; });
 process.stdin.on('end', () => {
+  const isAgy = argv[0] === '--input-format' && argv[1] === 'stream-json';
+  let prompt = rawStdin;
+  if (isAgy) {
+    let parsed;
+    try {
+      parsed = JSON.parse(rawStdin.trim());
+    } catch {
+      process.stderr.write('expected NDJSON user turn on stdin\n');
+      process.exitCode = 2;
+      return;
+    }
+    if (parsed?.event !== 'user' || typeof parsed?.message?.content !== 'string') {
+      process.stderr.write('invalid stream-json user event\n');
+      process.exitCode = 2;
+      return;
+    }
+    prompt = parsed.message.content;
+  }
   if (prompt.includes('SLEEP')) {
     setInterval(() => {}, 1000);
     return;
@@ -22,6 +41,8 @@ process.stdin.on('end', () => {
     rootTask: process.env.AGENT_BRIDGE_ROOT_TASK ?? null,
     claudecode: process.env.CLAUDECODE ?? null,
     codexThread: process.env.CODEX_THREAD_ID ?? null,
+    antigravityCsrf: process.env.ANTIGRAVITY_CSRF_TOKEN ?? null,
+    antigravityConv: process.env.ANTIGRAVITY_CONVERSATION_ID ?? null,
     hasPreamble: prompt.startsWith('[agent-bridge]'),
     argv,
   });
@@ -57,6 +78,38 @@ process.stdin.on('end', () => {
       permission_denials: [],
     }));
     if (failed) process.exitCode = 1;
+    return;
+  }
+  if (isAgy) {
+    const convAt = argv.indexOf('--conversation');
+    const conversationId = convAt >= 0 ? argv[convAt + 1] : 'd8f6899d-1b7f-4a8e-898a-4131bf6b1857';
+    const failed = prompt.includes('FAIL');
+    process.stdout.write(`${JSON.stringify({ event: 'init', conversation_id: conversationId, init: { model: 'gemini-3.8-flash' } })}\n`);
+    process.stdout.write(`${JSON.stringify({ event: 'step_update', step_update: { conversation_id: conversationId, step_index: 0, state: 'DONE', step_type: 'user_input' } })}\n`);
+    if (failed) {
+      process.stdout.write(`${JSON.stringify({
+        event: 'result',
+        result: {
+          conversation_id: conversationId,
+          status: 'ERROR',
+          error: 'model refused',
+          response: '',
+          num_turns: 1,
+        },
+      })}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(`${JSON.stringify({
+      event: 'result',
+      result: {
+        conversation_id: conversationId,
+        status: 'SUCCESS',
+        response: `ANTIGRAVITY-ECHO ${echo}`,
+        num_turns: convAt >= 0 ? 2 : 1,
+        usage: { input_tokens: 120, output_tokens: 18, thinking_tokens: 4, cache_read_tokens: 0, total_tokens: 142 },
+      },
+    })}\n`);
     return;
   }
   process.stderr.write('unknown fake mode\n');

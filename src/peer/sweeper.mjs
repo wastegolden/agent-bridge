@@ -5,7 +5,7 @@
 // Every closed ROOT task owns:
 //   * one durable Markdown record inside its project (the file at `record.path`), and
 //   * one `record` event in `<stateDir>/records-index.jsonl` listing the raw harness
-//     sessions of that task ({harness:'dsh'|'codex'|'claude-code', id, source, revision?, submittedBy?})
+//     sessions of that task ({harness:'dsh'|'codex'|'claude-code'|'antigravity', id, source, revision?, submittedBy?})
 //     together with the instant its raw sessions become eligible (`eligibleAt`; null means
 //     "keep forever").
 //
@@ -47,6 +47,9 @@
 //   * codex       -> 'delete'  : codexThreads.archive(id) then codexThreads.remove(id).
 //   * claude-code -> 'delete'  : remove `<claudeProjectsDir>/<project>/<id>.jsonl` and, when
 //                                present, the sibling directory `<project>/<id>` (recursive).
+//   * antigravity -> 'delete'  : remove `<antigravityDataDir>/brain/<id>` (recursive),
+//                                `presence/<id>.lock`, `conversations/<id>.db-wal`/`-shm`,
+//                                and `conversations/<id>.db` last.
 //   * dsh         -> 'archive' : bridge.archive(source, revision), then bridge.cleanup(source,
 //                                {dryRun:false}); a cleanup failure never fails the session.
 //
@@ -66,9 +69,10 @@ const ARGS_CODE = 'PEER_ARGS_INVALID';
 
 const CODEX = 'codex';
 const CLAUDE = 'claude-code';
+const ANTIGRAVITY = 'antigravity';
 const DSH = 'dsh';
 
-/** The exact id shape shared by a Codex thread id and a Claude Code session id. */
+/** The exact id shape shared by Codex thread ids, Claude Code session ids and Antigravity conversation ids. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Failures a session may accumulate before the sweeper stops retrying it. */
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -79,6 +83,7 @@ const NOTE_RECORD_FILE_MISSING = 'record file missing';
 const NOTE_INVALID_ID = 'invalid id';
 const NOTE_CODEX_UNAVAILABLE = 'codex client unavailable';
 const NOTE_CLAUDE_DIR_UNAVAILABLE = 'claude projects dir unavailable';
+const NOTE_ANTIGRAVITY_DIR_UNAVAILABLE = 'antigravity data dir unavailable';
 const NOTE_CLAUDE_FILE_MISSING = 'session file not found';
 const NOTE_CLAUDE_AMBIGUOUS = 'ambiguous';
 const NOTE_BRIDGE_UNAVAILABLE = 'bridge unavailable';
@@ -147,7 +152,7 @@ function isDshSource(value) {
 }
 
 function actionForHarness(harness) {
-  if (harness === CODEX || harness === CLAUDE) return 'delete';
+  if (harness === CODEX || harness === CLAUDE || harness === ANTIGRAVITY) return 'delete';
   if (harness === DSH) return 'archive';
   return 'skip';
 }
@@ -309,6 +314,54 @@ async function deleteClaudeSession(id, deps) {
   }
 }
 
+async function deleteAntigravitySession(id, deps) {
+  const action = 'delete';
+  const root = deps.antigravityDataDir;
+  if (root === null || root === undefined) {
+    return { action, state: 'deferred', note: NOTE_ANTIGRAVITY_DIR_UNAVAILABLE };
+  }
+  try {
+    if (!(await isDirectoryEntry(root, deps.stat))) {
+      return { action, state: 'deferred', note: NOTE_ANTIGRAVITY_DIR_UNAVAILABLE };
+    }
+    const conversationsDir = path.join(root, 'conversations');
+    if (!(await isDirectoryEntry(conversationsDir, deps.stat))) {
+      return { action, state: 'deferred', note: NOTE_ANTIGRAVITY_DIR_UNAVAILABLE };
+    }
+    const dbFile = path.join(conversationsDir, `${id}.db`);
+    let dbInfo;
+    try {
+      dbInfo = await deps.stat(dbFile);
+    } catch (error) {
+      if (isNotFound(error)) return { action, state: 'skipped', note: NOTE_CLAUDE_FILE_MISSING };
+      throw error;
+    }
+    if (typeof dbInfo?.isFile === 'function' && !dbInfo.isFile()) {
+      return { action, state: 'skipped', note: NOTE_CLAUDE_FILE_MISSING };
+    }
+    // The .db file is how the next sweep finds this session again, so it is removed last:
+    // a brain directory or sidecar that cannot be removed yet (EBUSY, EPERM) leaves the
+    // session findable and deferred instead of stranding artifacts forever.
+    const brainDir = path.join(root, 'brain', id);
+    if (await isDirectoryEntry(brainDir, deps.stat)) {
+      await deps.rm(brainDir, { recursive: true, force: true });
+    }
+    for (const sidecar of [
+      path.join(root, 'presence', `${id}.lock`),
+      path.join(conversationsDir, `${id}.db-wal`),
+      path.join(conversationsDir, `${id}.db-shm`),
+    ]) {
+      if (await entryExists(sidecar, deps.stat)) {
+        await deps.rm(sidecar, { force: true });
+      }
+    }
+    await deps.rm(dbFile);
+    return { action, state: 'deleted', note: null };
+  } catch (error) {
+    return { action, state: isUnavailable(error) ? 'deferred' : 'failed', note: errorNote(error) };
+  }
+}
+
 async function archiveDshTask(source, revision, deps) {
   const action = 'archive';
   const client = deps.bridge;
@@ -341,7 +394,7 @@ async function archiveDshTask(source, revision, deps) {
  */
 async function executeSession({ harness, id, source, revision, dryRun, deps }) {
   const action = actionForHarness(harness);
-  if (harness === CODEX || harness === CLAUDE) {
+  if (harness === CODEX || harness === CLAUDE || harness === ANTIGRAVITY) {
     if (!isUuid(id)) return { action, state: 'failed', note: NOTE_INVALID_ID };
   } else if (harness === DSH) {
     if (!isDshSource(source)) return { action, state: 'failed', note: NOTE_INVALID_ID };
@@ -351,6 +404,7 @@ async function executeSession({ harness, id, source, revision, dryRun, deps }) {
   if (dryRun) return { action, state: 'planned', note: null };
   if (harness === CODEX) return deleteCodexThread(id, deps);
   if (harness === CLAUDE) return deleteClaudeSession(id, deps);
+  if (harness === ANTIGRAVITY) return deleteAntigravitySession(id, deps);
   return archiveDshTask(source, revision, deps);
 }
 
@@ -374,6 +428,8 @@ function isActionable(state, failures, recordId, harness, id, maxAttempts) {
  *   of exhausted failures or historical skipped entries; dryRun only previews recovery
  * @param {string|null} [input.claudeProjectsDir] root whose immediate subdirectories hold
  *   `<sessionId>.jsonl` files
+ * @param {string|null} [input.antigravityDataDir] Antigravity CLI data directory holding
+ *   `conversations/<id>.db`, `brain/<id>/`, and `presence/<id>.lock`
  * @param {number} [input.maxAttempts] failed attempts allowed before a session is left alone
  * @param {object} [input.fsImpl] optional node:fs/promises overrides
  *   ({readFile, readdir, rm, stat, mkdir, appendFile})
@@ -390,6 +446,7 @@ export async function sweepRecords({
   codexThreads = null,
   bridge = null,
   claudeProjectsDir = null,
+  antigravityDataDir = null,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   retry = null,
   fsImpl = {},
@@ -422,6 +479,7 @@ export async function sweepRecords({
     codexThreads,
     bridge,
     claudeProjectsDir,
+    antigravityDataDir,
     maxAttempts,
   };
 

@@ -33,7 +33,7 @@ async function fixture(t) {
   await put(path.join(sourceDir, 'src/runtime.mjs'), '// current runtime');
   await put(path.join(sourceDir, 'skills/example/SKILL.md'), 'current skill');
   await put(path.join(sourceDir, 'dsh-host/index.cjs'), '// current host entry');
-  await put(path.join(sourceDir, 'package.json'), { name: 'agent-bridge', version: '2.0.0' });
+  await put(path.join(sourceDir, 'package.json'), { name: 'agent-bridge', version: '2.1.0' });
   const oldManifest = structuredClone(template);
   oldManifest.mcpServers.dsh_project = { type: 'http', url: 'http://127.0.0.1:1/old', headers: { Authorization: `Bearer ${LEGACY}` } };
   oldManifest.mcpServers.agent_peer.env = { KEEP_ENV: 'keep', dsh_mcp_token: LEGACY, AGENT_BRIDGE_CHAIN: 'old-root' };
@@ -312,7 +312,7 @@ test('ambiguous Codex caches require an explicit installed path and older instal
   await f.put(manifestPath, manifest);
   const options = { ...f.options, codexCacheDir: f.codexDir, dryRun: false };
   const result = await switchClients(options, f.deps);
-  assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '2.0.0');
+  assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '2.1.0');
   assert.equal(await readFile(path.join(f.claudeDir, 'src/runtime.mjs'), 'utf8'), '// current runtime');
   await switchClients({ rollback: result.backupDirectory, dryRun: false }, f.deps);
   assert.equal(JSON.parse(await readFile(manifestPath, 'utf8')).version, '1.7.0');
