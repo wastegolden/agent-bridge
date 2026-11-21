@@ -59,6 +59,25 @@ function parseJson(record) {
   return value;
 }
 
+/**
+ * The Claude app loads a plugin from a `directory` marketplace straight from
+ * the marketplace's source folder rather than from the installed cache, so that
+ * folder must be switched too. Returns null for any other marketplace kind.
+ */
+async function locateClaudeSource(settings, claudeId, read) {
+  const [name, marketplace] = claudeId.split('@');
+  const source = settings.extraKnownMarketplaces?.[marketplace]?.source;
+  if (!object(source) || source.source !== 'directory') return null;
+  if (typeof source.path !== 'string' || !path.isAbsolute(source.path)) fail('Claude directory marketplace path must be absolute.');
+  const record = await read(path.join(source.path, '.claude-plugin', 'marketplace.json'));
+  const catalog = parseJson(record);
+  const entries = Array.isArray(catalog.plugins) ? catalog.plugins.filter((entry) => entry?.name === name) : [];
+  if (entries.length !== 1 || typeof entries[0].source !== 'string') fail('Claude directory marketplace entry is missing, ambiguous or unsupported.');
+  const dir = path.resolve(source.path, entries[0].source);
+  if (!keyPath(dir).startsWith(`${keyPath(source.path)}/`)) fail('Claude directory marketplace entry must stay inside its marketplace.');
+  return { dir, record, catalog, entry: entries[0] };
+}
+
 /** Locate installed caches from their inventories, never from the newest mtime. */
 export async function planClientSwitch(config, options = {}) {
   validateConfig(config);
@@ -91,6 +110,8 @@ export async function planClientSwitch(config, options = {}) {
   const settingsRecord = await read(path.join(claudeHome, 'settings.json'));
   const settings = parseJson(settingsRecord);
   if (settings.enabledPlugins?.[claudeId] !== true) fail('Enable the Claude plugin before switching, then quit the application.');
+  const claudeSource = await locateClaudeSource(settings, claudeId, read);
+  const claudeDirs = [claudeDir, ...(claudeSource && keyPath(claudeSource.dir) !== keyPath(claudeDir) ? [claudeSource.dir] : [])];
   const codexConfig = await read(path.join(codexHome, 'config.toml'), false);
   if (!codexConfig.exists) fail('Codex configuration is missing.');
   const toml = Buffer.from(codexConfig.content, 'base64').toString('utf8');
@@ -119,10 +140,10 @@ export async function planClientSwitch(config, options = {}) {
     if (!(await stat(path.join(sourceDir, 'bin', name)).catch(() => null))?.isFile()) fail('Deployed MCP entry points are missing.');
   }
   const defaults = { node_path: slash(config.nodePath), peer_config: slash(layout.peerFiles.claude), dsh_bridge_url: config.bridgeUrl, bridge_credential_file: slash(layout.tokenFiles.claude) };
-  for (const dir of [claudeDir]) {
+  for (const dir of claudeDirs) {
     const record = await read(path.join(dir, '.claude-plugin', 'plugin.json'));
     const manifest = parseJson(record);
-    if (manifest.name !== template.name) fail('Claude installed cache does not contain the expected plugin.');
+    if (manifest.name !== template.name) fail('Claude installed cache or marketplace source does not contain the expected plugin.');
     manifest.version = template.version;
     manifest.description = template.description;
     manifest.userConfig ??= {};
@@ -141,6 +162,10 @@ export async function planClientSwitch(config, options = {}) {
   }
   installs[0].version = template.version;
   edit(inventoryRecord, inventory);
+  if (claudeSource) {
+    claudeSource.entry.version = template.version;
+    edit(claudeSource.record, claudeSource.catalog);
+  }
   settings.pluginConfigs ??= {};
   settings.pluginConfigs[claudeId] ??= {};
   settings.pluginConfigs[claudeId].options = { ...settings.pluginConfigs[claudeId].options, ...defaults };
@@ -200,7 +225,7 @@ export async function planClientSwitch(config, options = {}) {
   for (const relative of assets) {
     const source = await snapshot(path.join(sourceDir, relative), false);
     if (!source.exists) fail('Prepared plugin runtime is incomplete.');
-    for (const dir of new Set([claudeDir, codexDir, ...(config.codexPluginDir ? [config.codexPluginDir] : [])])) {
+    for (const dir of new Set([...claudeDirs, codexDir, ...(config.codexPluginDir ? [config.codexPluginDir] : [])])) {
       if (keyPath(dir) === keyPath(sourceDir)) continue;
       const record = await read(path.join(dir, relative));
       if (record.content !== source.content) desired.set(keyPath(record.path), { path: record.path, exists: true, content: source.content });
@@ -216,8 +241,8 @@ export async function planClientSwitch(config, options = {}) {
     peer.bridge = { ...peer.bridge, url: config.bridgeUrl, credentialFile: slash(layout.tokenFiles[id]) };
     edit(record, peer);
   }
-  return { originals: [...originals.values()], changes: [...desired.values()], processRoots: [sourceDir, claudeDir, codexDir, config.codexPluginDir].filter(Boolean),
-    locations: { claudeDir, codexDir, claudeSettings: settingsRecord.path, codexConfig: codexConfig.path, peerFiles: layout.peerFiles } };
+  return { originals: [...originals.values()], changes: [...desired.values()], processRoots: [sourceDir, ...claudeDirs, codexDir, config.codexPluginDir].filter(Boolean),
+    locations: { claudeDir, claudeSourceDir: claudeSource?.dir ?? null, codexDir, claudeSettings: settingsRecord.path, codexConfig: codexConfig.path, peerFiles: layout.peerFiles } };
 }
 
 export function blockingProcesses(processes, roots = [], ownPid = process.pid) {
@@ -325,6 +350,7 @@ export async function switchClients(options, { adapter, log = () => {}, now = ()
       return { dryRun, backupDirectory, rolledBack: true };
     }
     log(`Located Claude cache: ${plan.locations.claudeDir}`);
+    if (plan.locations.claudeSourceDir) log(`Located Claude marketplace source: ${plan.locations.claudeSourceDir}`);
     log(`Located Codex cache: ${plan.locations.codexDir}`);
     for (const change of plan.changes) log(`${dryRun ? 'Would update' : 'Planned update'}: ${change.path}`);
     const envChanges = ['User', 'Process'].filter((scope) => environment[scope].exists);

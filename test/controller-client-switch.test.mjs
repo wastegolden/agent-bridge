@@ -137,6 +137,62 @@ test('switch preserves unrelated settings, writes two root paths/URLs, and keeps
   assert.equal(JSON.stringify({ result, logs: f.logs }).includes(PROCESS), false);
 });
 
+test('a directory marketplace source the Claude app loads directly is switched and rolled back with the cache', async (t) => {
+  const f = await fixture(t);
+  const marketplaceDir = path.join(f.dir, 'claude marketplace');
+  const claudeSource = path.join(marketplaceDir, 'agent-bridge');
+  const catalogPath = path.join(marketplaceDir, '.claude-plugin/marketplace.json');
+  const catalog = { name: 'agent-bridge-local', owner: { name: 'keep' }, plugins: [{ name: 'agent-bridge', source: './agent-bridge', version: '1.7.0' }, { name: 'other', source: './other', version: '9' }] };
+  await f.put(catalogPath, catalog);
+  const oldSource = JSON.parse(await readFile(path.join(f.claudeDir, '.claude-plugin/plugin.json'), 'utf8'));
+  await f.put(path.join(claudeSource, '.claude-plugin/plugin.json'), oldSource);
+  await f.put(path.join(claudeSource, 'bin/bridge.mjs'), '// old 1.7.0 runtime');
+  const settings = JSON.parse(await readFile(f.settingsPath, 'utf8'));
+  settings.extraKnownMarketplaces = { 'agent-bridge-local': { source: { source: 'directory', path: marketplaceDir } } };
+  await f.put(f.settingsPath, settings);
+  const catalogBefore = await readFile(catalogPath);
+  const manifestBefore = await readFile(path.join(claudeSource, '.claude-plugin/plugin.json'));
+
+  const plan = await planClientSwitch(f.config, f.options);
+  assert.equal(plan.locations.claudeSourceDir, claudeSource);
+  assert.ok(plan.processRoots.includes(claudeSource));
+  const result = await switchClients({ ...f.options, dryRun: false }, f.deps);
+  assert.ok(f.logs.some((line) => line === `Located Claude marketplace source: ${claudeSource}`));
+  const manifest = JSON.parse(await readFile(path.join(claudeSource, '.claude-plugin/plugin.json'), 'utf8'));
+  for (const name of ['dsh_project', 'agent_peer']) {
+    const entry = manifest.mcpServers[name];
+    assert.equal(entry.type, 'stdio');
+    assert.equal(entry.headers, undefined);
+    assert.equal(entry.url, undefined);
+    assert.equal(entry.env.DSH_BRIDGE_CREDENTIAL_FILE, slash(f.layout.tokenFiles.claude));
+  }
+  assert.equal(JSON.stringify(manifest).includes(LEGACY), false);
+  assert.equal(await readFile(path.join(claudeSource, 'bin/bridge.mjs'), 'utf8'), '// fixture');
+  assert.equal(await readFile(path.join(claudeSource, 'src/runtime.mjs'), 'utf8'), '// current runtime');
+  const switched = JSON.parse(await readFile(catalogPath, 'utf8'));
+  assert.equal(switched.plugins[0].version, manifest.version);
+  assert.deepEqual(switched.plugins[1], catalog.plugins[1]);
+  assert.deepEqual(switched.owner, catalog.owner);
+
+  await switchClients({ rollback: result.backupDirectory, dryRun: false }, f.deps);
+  assert.deepEqual(await readFile(catalogPath), catalogBefore);
+  assert.deepEqual(await readFile(path.join(claudeSource, '.claude-plugin/plugin.json')), manifestBefore);
+  assert.equal(await readFile(path.join(claudeSource, 'bin/bridge.mjs'), 'utf8'), '// old 1.7.0 runtime');
+  assert.equal(await stat(path.join(claudeSource, 'src/runtime.mjs')).catch(() => null), null);
+});
+
+test('a directory marketplace entry that escapes the marketplace or is ambiguous is refused before any change', async (t) => {
+  for (const plugins of [[{ name: 'agent-bridge', source: '../outside' }], [{ name: 'agent-bridge', source: './a' }, { name: 'agent-bridge', source: './b' }], [{ name: 'agent-bridge', source: { source: 'github', repo: 'x/y' } }]]) {
+    const f = await fixture(t);
+    const marketplaceDir = path.join(f.dir, 'market');
+    await f.put(path.join(marketplaceDir, '.claude-plugin/marketplace.json'), { name: 'agent-bridge-local', plugins });
+    const settings = JSON.parse(await readFile(f.settingsPath, 'utf8'));
+    settings.extraKnownMarketplaces = { 'agent-bridge-local': { source: { source: 'directory', path: marketplaceDir } } };
+    await f.put(f.settingsPath, settings);
+    await assert.rejects(planClientSwitch(f.config, f.options), /Claude directory marketplace entry/);
+  }
+});
+
 test('rerun is idempotent, absent variables succeed, and timestamp collisions preserve first backup', async (t) => {
   const f = await fixture(t);
   const first = await switchClients({ ...f.options, dryRun: false }, f.deps);
