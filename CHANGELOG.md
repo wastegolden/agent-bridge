@@ -3,6 +3,7 @@
 - Opting into Antigravity during an upgrade now adds missing peer settings to existing per-controller and shared configurations. User overrides are preserved.
 - Antigravity jobs parse NDJSON as it arrives, retaining the final answer and session metadata when progress output exceeds 16 MiB.
 - Windows client switching accepts Claude directory marketplaces that use the marketplace root (`./`) as the plugin source.
+- Added the `back-to-back-cross-check` skill for blind, headless-CLI multi-model cross-verification and anonymized adversarial critique across Codex, Claude Code, Antigravity, native subagents, and DSH.
 
 # 2.1.0 — bidirectional Antigravity support and read-only `webSearch` toggle (2026-11-21)
 
